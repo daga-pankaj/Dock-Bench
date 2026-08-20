@@ -11,4 +11,4 @@ if [ ! -x "$HERE/.venv/bin/python" ]; then
 fi
 
 cd "$HERE"
-exec "$HERE/.venv/bin/python" -m uvicorn backend.main:app --host 127.0.0.1 --port "$PORT" "$@"
+exec "$HERE/.venv/bin/python" -u -m uvicorn backend.main:app --host 127.0.0.1 --port "$PORT" "$@"

@@ -5,7 +5,9 @@ Run with:  uvicorn backend.main:app --reload --port 8000
 
 from __future__ import annotations
 
+import base64
 import csv
+import hmac
 import io
 import os
 import re
@@ -37,10 +39,38 @@ from .jobs import MANAGER, JobParams
 
 config.ensure_dirs()
 
+if config.AUTH_GENERATED:
+    print(f"\n>>> auth enabled - user: {config.AUTH_USER}  password: {config.AUTH_PASS}\n")
+
 app = FastAPI(title="Docking Bench", version="1.0")
 
 PDB_ID_RE = re.compile(r"^[0-9A-Za-z]{4}$")
 MAX_BOX = 60.0
+
+
+@app.middleware("http")
+async def basic_auth(request, call_next):
+    """Gate every route behind HTTP Basic when DOCKING_AUTH_PASS is set.
+
+    Off by default (plain localhost use); turn on before sharing a tunnel
+    link with anyone outside your machine.
+    """
+    if config.AUTH_PASS is None:
+        return await call_next(request)
+    header = request.headers.get("authorization", "")
+    ok = False
+    if header.startswith("Basic "):
+        try:
+            user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
+            ok = hmac.compare_digest(user, config.AUTH_USER) and hmac.compare_digest(pw, config.AUTH_PASS)
+        except Exception:
+            ok = False
+    if not ok:
+        return Response(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Docking Bench"'},
+        )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +265,8 @@ def create_job(req: JobRequest) -> dict:
         raise HTTPException(503, "smina not installed - run ./setup.sh")
     if not req.ligands:
         raise HTTPException(400, "no ligands submitted")
+    if len(req.ligands) > config.MAX_LIGANDS_PER_JOB:
+        raise HTTPException(400, f"too many ligands in one job (max {config.MAX_LIGANDS_PER_JOB})")
     if req.scoring not in docking.SCORING_FUNCTIONS:
         raise HTTPException(400, f"unknown scoring function {req.scoring}")
     for value in req.size:

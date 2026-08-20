@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 from pathlib import Path
 
@@ -24,6 +25,21 @@ SMINA_TIMEOUT = int(os.environ.get("SMINA_TIMEOUT", 1800))
 
 # Poses kept per ligand.
 DEFAULT_NUM_MODES = 5
+
+# Ligands allowed in a single job. Kept low by default since this is meant
+# for a local/trusted-link setup, not a public multi-tenant service.
+MAX_LIGANDS_PER_JOB = int(os.environ.get("DOCKING_MAX_LIGANDS", 50))
+
+# HTTP Basic auth for sharing the app over a tunnel/link. Unset
+# DOCKING_AUTH_PASS to leave the app open (fine for pure localhost use). Set
+# it explicitly for a stable password across restarts, or leave it to
+# auto-generate one printed to the console each start.
+AUTH_USER = os.environ.get("DOCKING_AUTH_USER", "colleague")
+AUTH_PASS = os.environ.get("DOCKING_AUTH_PASS")
+AUTH_GENERATED = False
+if AUTH_PASS is None and os.environ.get("DOCKING_REQUIRE_AUTH"):
+    AUTH_PASS = secrets.token_urlsafe(9)
+    AUTH_GENERATED = True
 
 
 def find_smina() -> str | None:
