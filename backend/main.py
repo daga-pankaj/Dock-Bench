@@ -7,11 +7,25 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 import urllib.error
 import urllib.request
 import uuid
 import zipfile
+
+# python.org's macOS Framework build ships without a CA bundle wired up, so
+# urllib.request.urlopen fails with CERTIFICATE_VERIFY_FAILED until either
+# "Install Certificates.command" is run or SSL_CERT_FILE points somewhere
+# real. certifi carries its own bundle - use it as a fallback so RCSB fetch
+# works out of the box on a fresh venv.
+if not os.environ.get("SSL_CERT_FILE"):
+    try:
+        import certifi
+
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+    except ImportError:
+        pass
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
