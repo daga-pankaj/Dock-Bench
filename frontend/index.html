@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docking Bench — smina</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+</head>
+<body>
+<header>
+  <h1>Docking Bench</h1>
+  <span class="sub">smina · local docking</span>
+  <span id="engine" class="pill warn">checking engine…</span>
+</header>
+
+<main>
+  <!-- left column: setup -->
+  <section class="panel" id="setup">
+    <div class="card">
+      <h2>1 · Receptor</h2>
+      <div class="row">
+        <input id="pdbId" placeholder="PDB ID (e.g. 1STP)" maxlength="4">
+        <button id="fetchBtn">Fetch</button>
+      </div>
+      <div class="row">
+        <label class="filebtn">Upload .pdb<input type="file" id="pdbFile" accept=".pdb,.ent,.txt"></label>
+        <span id="receptorInfo" class="muted">no receptor loaded</span>
+      </div>
+      <div class="row checks">
+        <label><input type="checkbox" id="showSurface"> surface</label>
+        <label><input type="checkbox" id="showWaters"> waters (view)</label>
+        <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Active site</h2>
+      <p class="muted small">Click a bound ligand in the viewer to box it, or switch to
+        <b>pick atoms</b> and click residues to build a box from the picks.</p>
+      <div class="row">
+        <div class="seg">
+          <button class="segbtn active" data-mode="ligand">click ligand</button>
+          <button class="segbtn" data-mode="atoms">pick atoms</button>
+        </div>
+        <button id="clearPicks" class="ghost">clear picks</button>
+      </div>
+      <div id="hetList" class="hetlist"></div>
+      <div class="grid3">
+        <label>center x<input type="number" step="0.1" id="cx"></label>
+        <label>center y<input type="number" step="0.1" id="cy"></label>
+        <label>center z<input type="number" step="0.1" id="cz"></label>
+        <label>size x<input type="number" step="0.5" id="sx" value="22"></label>
+        <label>size y<input type="number" step="0.5" id="sy" value="22"></label>
+        <label>size z<input type="number" step="0.5" id="sz" value="22"></label>
+      </div>
+      <div class="row">
+        <label class="inline">padding <input type="number" id="padding" value="5" step="0.5" min="0" max="15"> Å</label>
+        <button id="cubeBtn" class="ghost">make cubic</button>
+        <span id="siteInfo" class="muted small"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3 · Ligands</h2>
+      <textarea id="smilesBox" rows="5" spellcheck="false"
+        placeholder="One SMILES per line, optional name after a space:&#10;CC(=O)Oc1ccccc1C(=O)O aspirin&#10;CN1C=NC2=C1C(=O)N(C)C(=O)N2C caffeine"></textarea>
+      <div class="row">
+        <button id="parseText" class="ghost">Load from box</button>
+        <label class="filebtn">Upload .smi/.sdf/.csv<input type="file" id="ligFile" accept=".smi,.smiles,.txt,.sdf,.sd,.mol,.csv,.tsv"></label>
+        <span id="ligInfo" class="muted"></span>
+      </div>
+      <div id="ligPreview" class="ligpreview"></div>
+    </div>
+
+    <div class="card">
+      <h2>4 · Docking parameters</h2>
+      <div class="grid3">
+        <label>exhaustiveness<input type="number" id="exh" value="8" min="1" max="64"></label>
+        <label>poses kept<input type="number" id="modes" value="5" min="1" max="20"></label>
+        <label>energy range<input type="number" id="erange" value="4" step="0.5" min="0.5" max="20"></label>
+        <label>seed<input type="number" id="seed" value="42"></label>
+        <label>scoring<select id="scoring"></select></label>
+      </div>
+      <div class="row">
+        <button id="runBtn" class="primary">Run docking</button>
+        <button id="cancelBtn" class="ghost" disabled>Cancel</button>
+        <span id="runInfo" class="muted"></span>
+      </div>
+      <div class="progress"><div id="bar"></div></div>
+    </div>
+  </section>
+
+  <!-- right column: viewer + results -->
+  <section class="panel" id="right">
+    <div class="card viewer-card">
+      <div class="row viewer-head">
+        <h2>Viewer</h2>
+        <div class="row tight">
+          <select id="styleSel">
+            <option value="cartoon">cartoon</option>
+            <option value="cartoon+sticks">cartoon + site sticks</option>
+            <option value="sticks">sticks</option>
+            <option value="line">lines</option>
+          </select>
+          <button id="resetView" class="ghost">reset view</button>
+        </div>
+      </div>
+      <div id="viewer"></div>
+      <div id="poseBar" class="posebar hidden"></div>
+    </div>
+
+    <div class="card">
+      <div class="row viewer-head">
+        <h2>Results</h2>
+        <div class="row tight">
+          <a id="dlZip" class="ghost btnlink disabled">Download all (ZIP)</a>
+          <a id="dlCsv" class="ghost btnlink disabled">CSV</a>
+        </div>
+      </div>
+      <table id="results">
+        <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="resultsEmpty" class="muted small">No job yet. Results appear here as each ligand finishes.</p>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>
