@@ -76,6 +76,7 @@ let picksRefs = [];              // state refs for the pick-point markers struct
 let poseStructureRefs = [];      // top-level structure refs, one per pose (for teardown)
 let poseStructures = [];         // Structure selectors, one per pose (for the interactions merge below)
 let interactionRefs = [];        // merged receptor+pose structure showing the active pose's contacts
+let receptorLigandRep = null;    // the receptor's own bound-ligand(s) rep, for the "hide" checkbox
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -208,24 +209,37 @@ async function styleReceptor() {
   await deleteRefs(receptorComponentRefs);
   receptorComponentRefs = [];
   const track = (ref) => { if (ref) receptorComponentRefs.push(ref); };
+  const hideOrig = $("hideOrigLigand").checked;
+  const hideIfOrig = (rep) => {
+    if (rep && hideOrig) plugin.state.data.updateCellState(rep.ref, { isHidden: true });
+  };
 
   const polymerComp = await plugin.builders.structure.tryCreateComponentFromExpression(
     receptorStructure, Queries.polymer.expression, "polymer");
   track(polymerComp);
   track(await addRep(polymerComp, "cartoon", "chain-id", undefined, { opacity: 0.92 }));
 
-  // bound ligands / cofactors — always sticks so they stay clickable
+  // bound ligands / cofactors — always sticks so they stay clickable (unless
+  // the "hide existing ligand" checkbox is on, e.g. to declutter a pocket
+  // that already has a co-crystallised ligand while looking at a docked one)
   const ligandExpr = MS.struct.combinator.merge([Queries.ligand.expression, Queries.ion.expression]);
   const ligandComp = await plugin.builders.structure.tryCreateComponentFromExpression(
     receptorStructure, ligandExpr, "ligands");
   track(ligandComp);
-  track(await addRep(ligandComp, "ball-and-stick", "uniform", { value: Color(0x4caf50) }, { sizeFactor: 0.25 }));
+  receptorLigandRep = await addRep(ligandComp, "ball-and-stick", "uniform", { value: Color(0x4caf50) }, { sizeFactor: 0.25 });
+  track(receptorLigandRep);
+  hideIfOrig(receptorLigandRep);
 
   if (S.activeHet) {
     const activeComp = await plugin.builders.structure.tryCreateComponentFromExpression(
       receptorStructure, hetExpr(S.activeHet), "active-site");
     track(activeComp);
-    track(await addRep(activeComp, "ball-and-stick", "uniform", { value: Color(0xf5a623) }, { sizeFactor: 0.28 }));
+    // the orange active-site highlight sits on the same atoms as the ligand
+    // rep above (when the active site *is* a bound ligand) - "hide existing
+    // ligand" should take that with it too.
+    const activeRep = await addRep(activeComp, "ball-and-stick", "uniform", { value: Color(0xf5a623) }, { sizeFactor: 0.28 });
+    track(activeRep);
+    hideIfOrig(activeRep);
   }
 }
 
@@ -656,10 +670,29 @@ async function showInteractions(idx) {
     const merged = await plugin.state.data.build().toRoot()
       .apply(MergeStructures, { structures }, { dependsOn: structures.map((s) => s.ref) })
       .commit();
-    const ligandComp = await plugin.builders.structure.tryCreateComponentFromExpression(
-      merged, Queries.ligand.expression, "pose-ligand");
-    await addRep(ligandComp, InteractionsRepresentationProvider, InteractionTypeColorThemeProvider,
+
+    // Queries.ligand also catches the receptor's own bound ligand(s), if any
+    // (e.g. the co-crystallised BTN in 1STP) - exclude those so this is
+    // specifically the docked pose we just merged in.
+    const originalLigandExprs = (S.receptor?.het_ligands || []).map(hetExpr);
+    const poseExpr = originalLigandExprs.length
+      ? MS.struct.modifier.exceptBy({ 0: Queries.ligand.expression, by: MS.struct.combinator.merge(originalLigandExprs) })
+      : Queries.ligand.expression;
+
+    const poseComp = await plugin.builders.structure.tryCreateComponentFromExpression(merged, poseExpr, "pose-ligand");
+    await addRep(poseComp, InteractionsRepresentationProvider, InteractionTypeColorThemeProvider,
       undefined, { includeParent: true, parentDisplay: "between" });
+
+    // Residues close enough to plausibly interact, as sticks - the base
+    // cartoon representation doesn't draw side chains, so without this the
+    // dashed contact lines above have nothing visible to point at.
+    const nearbyExpr = MS.struct.modifier.exceptBy({
+      0: MS.struct.modifier.includeSurroundings({ 0: poseExpr, radius: 4.5, "as-whole-residues": true }),
+      by: poseExpr,
+    });
+    const nearbyComp = await plugin.builders.structure.tryCreateComponentFromExpression(merged, nearbyExpr, "pose-contact-residues");
+    await addRep(nearbyComp, "ball-and-stick", "element-symbol", undefined, { sizeFactor: 0.18 });
+
     interactionRefs = [merged];
   } catch (err) {
     console.warn("interactions failed", err);
@@ -729,6 +762,7 @@ function wire() {
   });
 
   $("clearPicks").onclick = clearPicks;
+  $("hideOrigLigand").onchange = styleReceptor;
   $("cubeBtn").onclick = () => {
     const s = boxSize().filter(Number.isFinite);
     if (!s.length) return;
