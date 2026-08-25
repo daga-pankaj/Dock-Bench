@@ -46,6 +46,48 @@ def test_build_command_rejects_unknown_scoring(monkeypatch):
         )
 
 
+def test_build_command_uses_gnina_when_selected(monkeypatch):
+    monkeypatch.setattr(docking.config, "find_gnina", lambda: "/usr/bin/gnina")
+    cmd = docking.build_command(
+        Path("r.pdb"), Path("l.sdf"), Path("o.sdf"), (0, 0, 0), (10, 10, 10), engine="gnina"
+    )
+    assert cmd[0] == "/usr/bin/gnina"
+    assert "--no_gpu" not in cmd
+
+
+def test_build_command_gnina_cpu_only_adds_no_gpu_flag(monkeypatch):
+    monkeypatch.setattr(docking.config, "find_gnina", lambda: "/usr/bin/gnina")
+    cmd = docking.build_command(
+        Path("r.pdb"), Path("l.sdf"), Path("o.sdf"), (0, 0, 0), (10, 10, 10),
+        engine="gnina", use_gpu=False,
+    )
+    assert "--no_gpu" in cmd
+
+
+def test_build_command_smina_ignores_use_gpu(monkeypatch):
+    monkeypatch.setattr(docking.config, "find_smina", lambda: "/usr/bin/smina")
+    cmd = docking.build_command(
+        Path("r.pdb"), Path("l.sdf"), Path("o.sdf"), (0, 0, 0), (10, 10, 10), use_gpu=False
+    )
+    assert "--no_gpu" not in cmd
+
+
+def test_build_command_raises_when_gnina_missing(monkeypatch):
+    monkeypatch.setattr(docking.config, "find_gnina", lambda: None)
+    with pytest.raises(docking.GninaNotFound):
+        docking.build_command(
+            Path("r.pdb"), Path("l.sdf"), Path("o.sdf"), (0, 0, 0), (10, 10, 10), engine="gnina"
+        )
+
+
+def test_build_command_rejects_unknown_engine(monkeypatch):
+    monkeypatch.setattr(docking.config, "find_smina", lambda: "/usr/bin/smina")
+    with pytest.raises(ValueError):
+        docking.build_command(
+            Path("r.pdb"), Path("l.sdf"), Path("o.sdf"), (0, 0, 0), (10, 10, 10), engine="nope"
+        )
+
+
 def test_parse_poses_missing_file_returns_empty():
     assert docking.parse_poses(Path("/nonexistent/path.sdf")) == []
 

@@ -1,10 +1,12 @@
 # Docking Bench
 
 Local web app for small-molecule docking against a protein receptor, using
-[smina](https://sourceforge.net/projects/smina/) as the docking engine and
-[RDKit](https://www.rdkit.org/) for ligand 3D structure generation. Runs
-entirely on your machine — no external services beyond fetching PDB files
-from RCSB and a CDN-hosted 3Dmol.js viewer script.
+[smina](https://sourceforge.net/projects/smina/) or
+[gnina](https://github.com/gnina/gnina) (GPU-capable, Linux only) as the
+docking engine and [RDKit](https://www.rdkit.org/) for ligand 3D structure
+generation. Runs entirely on your machine — no external services beyond
+fetching PDB files from RCSB. The 3D viewer is [Mol*](https://molstar.org/),
+bundled locally at setup time (see "Frontend viewer build" below).
 
 ## Features
 
@@ -12,19 +14,35 @@ from RCSB and a CDN-hosted 3Dmol.js viewer script.
 - Auto-detect bound HETATM ligands/cofactors to seed the docking box, or
   click atoms in the 3D viewer to build a box manually
 - Load ligands from pasted SMILES, or upload `.smi`/`.sdf`/`.mol`/`.csv`/`.tsv`
-- Dock many ligands concurrently (one smina process per ligand, thread pool)
+- Dock many ligands concurrently (one docking process per ligand, thread pool)
+- Pick smina or gnina as the engine per job; gnina can use a CUDA GPU when
+  one's present (Linux/WSL2 only — no Windows build upstream)
 - Live job progress, per-ligand poses viewable in-browser, CSV/ZIP export
 - Job history survives a server restart (state reloaded from `runs/jobs/`)
 
 ## Setup
 
+Needs [Node.js](https://nodejs.org/) (any recent LTS) on `PATH` in addition to
+Python 3 — it's used once, at setup time, to bundle the Mol* viewer.
+
+macOS / Linux:
 ```bash
-./setup.sh   # installs smina (via micromamba) into .env-tools/, and a
-             # Python venv into .venv/ with fastapi, rdkit, etc.
+./setup.sh   # installs smina (+ gnina on Linux) via micromamba into
+             # .env-tools/, a Python venv into .venv/ with fastapi,
+             # rdkit, etc., and builds frontend/app.js (see below).
+```
+
+Windows (native, CPU-only — no gnina/GPU build exists for Windows; run
+inside WSL2 with `setup.sh` instead if you need GPU docking on a Windows
+box):
+```powershell
+.\setup.ps1   # same idea, using micromamba's win-64 build and a
+              # Scripts\python.exe venv
 ```
 
 Safe to re-run; existing installs are reused. Supported platforms: macOS
-(arm64/x86_64), Linux (x86_64/aarch64).
+(arm64/x86_64), Linux (x86_64/aarch64, gnina needs x86_64), Windows (x86_64,
+smina only).
 
 ## Run
 
@@ -33,8 +51,13 @@ Safe to re-run; existing installs are reused. Supported platforms: macOS
 PORT=9000 ./run.sh        # pick a different port
 ```
 
+```powershell
+.\run.ps1                 # Windows equivalent
+$env:PORT=9000; .\run.ps1  # pick a different port
+```
+
 Open the printed URL in a browser. The top-right pill shows whether smina
-was found; if not, re-run `./setup.sh`.
+and/or gnina were found; if not, re-run `./setup.sh` (or `setup.ps1`).
 
 ## Sharing with a remote colleague
 
@@ -63,9 +86,23 @@ machine can reach it. To hand a colleague a link:
 .venv/bin/python -m pytest tests/ -q
 ```
 
-Tests cover receptor cleanup/HET detection, ligand parsing, smina command
-construction, and job persistence — they mock the smina subprocess call, so
-they run without smina installed.
+Tests cover receptor cleanup/HET detection, ligand parsing, smina/gnina
+command construction, and job persistence — they mock the subprocess call,
+so they run without smina or gnina installed.
+
+## Frontend viewer build
+
+The 3D viewer is [Mol*](https://molstar.org/) (custom minimal canvas — no
+default panels, just the app's own buttons), imported as a real ES module in
+`frontend/src/app.js` and bundled with esbuild into `frontend/app.js`, the
+plain script `index.html` loads. `./setup.sh` / `setup.ps1` run this for you;
+to rebuild by hand after editing `src/app.js`:
+```bash
+cd frontend
+npm install     # first time only
+npm run build   # one-off bundle
+npm run watch    # rebuild on every save while developing
+```
 
 ## Project layout
 
@@ -73,11 +110,17 @@ they run without smina installed.
 backend/
   main.py     FastAPI app: receptor/ligand/job HTTP routes
   jobs.py     Job store: one job -> many ligands, each docked in a thread
-  docking.py  Thin wrapper around the smina CLI
+  docking.py  Thin wrapper around the smina/gnina CLI
   prep.py     Receptor cleanup, HET-ligand grouping, ligand parsing/3D embed
   config.py   Paths and runtime settings (env-var overridable)
 frontend/
-  index.html, app.js, style.css   Static single-page UI (3Dmol.js viewer)
+  index.html, style.css     Static single-page UI shell
+  src/app.js                Real source (imports Mol* directly) - edit this
+  app.js, vendor/            Built by `npm run build`; gitignored, what index.html
+                             actually loads (app.js is the esbuild bundle of
+                             src/app.js; vendor/molstar.css is copied from the
+                             molstar package)
+  package.json, build.mjs   esbuild bundling (see "Frontend viewer build")
 tests/        pytest suite for the backend
 runs/         receptor uploads + job outputs (gitignored; created at runtime)
 ```
@@ -88,9 +131,10 @@ runs/         receptor uploads + job outputs (gitignored; created at runtime)
 |----------------------|---------------------------|---------------------------------------|
 | `PORT`               | `8000`                    | `run.sh` listen port                  |
 | `DOCKING_RUNS_DIR`   | `<repo>/runs`             | where receptors/job outputs are stored |
-| `DOCKING_WORKERS`    | `cpu_count - 1`           | max concurrent smina processes        |
-| `SMINA_TIMEOUT`      | `1800` (seconds)          | per-ligand smina hard timeout         |
+| `DOCKING_WORKERS`    | `cpu_count - 1`           | max concurrent docking processes      |
+| `SMINA_TIMEOUT`      | `1800` (seconds)          | per-ligand docking hard timeout       |
 | `SMINA_BIN`          | (unset)                   | explicit path to a smina executable   |
+| `GNINA_BIN`          | (unset)                   | explicit path to a gnina executable   |
 | `DOCKING_MAX_LIGANDS`| `50`                      | max ligands accepted per job          |
 | `DOCKING_REQUIRE_AUTH`| (unset)                  | set to anything to turn on HTTP Basic auth with an auto-generated password (printed to console on start) |
 | `DOCKING_AUTH_USER`  | `colleague`               | Basic auth username                   |

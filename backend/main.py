@@ -102,8 +102,12 @@ class JobRequest(BaseModel):
     energy_range: float = Field(4.0, ge=0.5, le=20.0)
     seed: int = 42
     scoring: str = "vina"
+    engine: str = "smina"
+    use_gpu: bool = True
     keep_waters: bool = False
     exclude_het: list[str] = Field(default_factory=list)
+    trim_distant_chains: bool = False
+    chain_cutoff: float = Field(15.0, ge=5.0, le=60.0)
 
 
 # ---------------------------------------------------------------------------
@@ -148,16 +152,22 @@ def _safe_name(name: str) -> str:
 
 @app.get("/api/status")
 def status() -> dict:
-    exe = config.find_smina()
-    version = None
-    if exe:
+    def version_of(engine: str, exe: str | None) -> str | None:
+        if not exe:
+            return None
         try:
-            version = docking.smina_version()
+            return docking.engine_version(engine)
         except Exception as exc:
-            version = f"error: {exc}"
+            return f"error: {exc}"
+
+    smina_exe = config.find_smina()
+    gnina_exe = config.find_gnina()
     return {
-        "smina": exe,
-        "smina_version": version,
+        "smina": smina_exe,
+        "smina_version": version_of("smina", smina_exe),
+        "gnina": gnina_exe,
+        "gnina_version": version_of("gnina", gnina_exe),
+        "gpu_available": config.has_nvidia_gpu(),
         "workers": config.MAX_WORKERS,
         "scoring_functions": list(docking.SCORING_FUNCTIONS),
         "default_num_modes": config.DEFAULT_NUM_MODES,
@@ -261,8 +271,11 @@ async def parse_ligand_file(file: UploadFile = File(...)) -> dict:
 
 @app.post("/api/jobs")
 def create_job(req: JobRequest) -> dict:
-    if not config.find_smina():
-        raise HTTPException(503, "smina not installed - run ./setup.sh")
+    if req.engine not in docking.ENGINES:
+        raise HTTPException(400, f"unknown docking engine {req.engine}")
+    engine_exe = config.find_gnina() if req.engine == "gnina" else config.find_smina()
+    if not engine_exe:
+        raise HTTPException(503, f"{req.engine} not installed - run ./setup.sh")
     if not req.ligands:
         raise HTTPException(400, "no ligands submitted")
     if len(req.ligands) > config.MAX_LIGANDS_PER_JOB:
@@ -274,7 +287,12 @@ def create_job(req: JobRequest) -> dict:
             raise HTTPException(400, f"box edge {value} A outside 4-{MAX_BOX} A")
 
     receptor_text = _receptor_path(req.receptor_id).read_text()
-    cleaned = prep.clean_receptor(receptor_text, keep_waters=req.keep_waters)
+    cleaned = prep.clean_receptor(
+        receptor_text,
+        keep_waters=req.keep_waters,
+        site_center=tuple(req.center) if req.trim_distant_chains else None,
+        chain_cutoff=req.chain_cutoff,
+    )
     if not cleaned.strip().splitlines()[:-1]:
         raise HTTPException(400, "receptor is empty after cleanup")
 
@@ -290,6 +308,8 @@ def create_job(req: JobRequest) -> dict:
         energy_range=req.energy_range,
         seed=req.seed,
         scoring=req.scoring,
+        engine=req.engine,
+        use_gpu=req.use_gpu,
     )
     job = MANAGER.submit(cleaned, f"receptor_{req.receptor_id}", specs, params)
     return job.as_dict()

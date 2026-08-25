@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Docking Bench — smina</title>
+<link rel="stylesheet" href="vendor/molstar.css">
 <link rel="stylesheet" href="style.css">
-<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
 </head>
 <body>
 <header>
@@ -31,6 +31,7 @@
         <label><input type="checkbox" id="showSurface"> surface</label>
         <label><input type="checkbox" id="showWaters"> waters (view)</label>
         <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
+        <label><input type="checkbox" id="trimChains"> drop extra monomers far from site</label>
       </div>
     </div>
 
@@ -81,6 +82,21 @@
         <label>energy range<input type="number" id="erange" value="4" step="0.5" min="0.5" max="20"></label>
         <label>seed<input type="number" id="seed" value="42"></label>
         <label>scoring<select id="scoring"></select></label>
+        <label>engine
+          <select id="engineSel">
+            <option value="smina">smina (CPU)</option>
+            <option value="gnina">gnina (CPU/GPU)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row" id="gpuRow" style="display:none;">
+        <label class="inline">device
+          <select id="deviceSel">
+            <option value="gpu">GPU if available</option>
+            <option value="cpu">CPU only</option>
+          </select>
+        </label>
+        <span id="gpuInfo" class="muted small"></span>
       </div>
       <div class="row">
         <button id="runBtn" class="primary">Run docking</button>
@@ -104,6 +120,12 @@
             <option value="line">lines</option>
           </select>
           <button id="resetView" class="ghost">reset view</button>
+          <button id="zoomInBtn" class="ghost" title="zoom in">+</button>
+          <button id="zoomOutBtn" class="ghost" title="zoom out">-</button>
+          <button id="zoomSiteBtn" class="ghost" title="zoom to docking box">site</button>
+          <button id="spinBtn" class="ghost" title="toggle auto-spin">spin</button>
+          <button id="fullscreenBtn" class="ghost" title="fullscreen">&#x26F6;</button>
+          <button id="snapshotBtn" class="ghost" title="save PNG snapshot">PNG</button>
         </div>
       </div>
       <div id="viewer"></div>
