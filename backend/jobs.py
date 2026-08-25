@@ -257,6 +257,15 @@ class JobManager:
             lig_path = job.ligand_input(run.name)
             lig_path.write_text(molblock + "$$$$\n")
 
+            # A job with fewer ligands than worker slots would otherwise leave
+            # most cores idle - a 1-ligand job used to run smina pinned to a
+            # single core even on a 9-worker box. Spread MAX_WORKERS cores
+            # across however many ligands are actually running concurrently
+            # (never more slots than ligands in the job), so a small job still
+            # lets each smina process use several cores internally.
+            n_concurrent = max(1, min(len(job.ligands), config.MAX_WORKERS))
+            cpu_per_ligand = max(1, config.MAX_WORKERS // n_concurrent)
+
             poses = docking.dock(
                 receptor=job.receptor_path,
                 ligand_sdf=lig_path,
@@ -271,7 +280,7 @@ class JobManager:
                 scoring=job.params.scoring,
                 engine=job.params.engine,
                 use_gpu=job.params.use_gpu,
-                cpu=1,
+                cpu=cpu_per_ligand,
             )
             scores = [p.affinity for p in poses if p.affinity is not None]
             run.scores = scores
