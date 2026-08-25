@@ -10,7 +10,6 @@ import { createPluginUI } from "molstar/lib/mol-plugin-ui/index";
 import { renderReact18 } from "molstar/lib/mol-plugin-ui/react18";
 import { DefaultPluginUISpec } from "molstar/lib/mol-plugin-ui/spec";
 import { PluginCommands } from "molstar/lib/mol-plugin/commands";
-import { PluginConfig } from "molstar/lib/mol-plugin/config";
 import { StructureElement, StructureProperties } from "molstar/lib/mol-model/structure";
 import { StructureSelectionQueries as Queries } from "molstar/lib/mol-plugin-state/helpers/structure-selection-query";
 import { MolScriptBuilder as MS } from "molstar/lib/mol-script/language/builder";
@@ -40,7 +39,6 @@ let receptorComponentRefs = []; // components (+ their reps) built by styleRecep
 let boxRefs = [];                // state refs for the docking-box wireframe structure
 let picksRefs = [];              // state refs for the pick-point markers structure
 let poseStructureRefs = [];      // top-level structure refs, one per pose (for teardown)
-let spinning = false;
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -80,25 +78,10 @@ async function deleteRefs(refs) {
 // ---------------------------------------------------------------------------
 
 async function initViewer() {
-  const defaultSpec = DefaultPluginUISpec();
-  const spec = {
-    ...defaultSpec,
-    layout: { initial: { isExpanded: false, showControls: false, controlsDisplay: "reactive" } },
-    components: {
-      ...defaultSpec.components,
-      controls: { ...defaultSpec.components?.controls, top: "none", bottom: "none", left: "none", right: "none" },
-      remoteState: "none",
-    },
-    config: [
-      [PluginConfig.Viewport.ShowExpand, false],
-      [PluginConfig.Viewport.ShowControls, false],
-      [PluginConfig.Viewport.ShowSettings, false],
-      [PluginConfig.Viewport.ShowSelectionMode, false],
-      [PluginConfig.Viewport.ShowAnimation, false],
-    ],
-  };
-
-  plugin = await createPluginUI({ target: $("viewer"), spec, render: renderReact18 });
+  // The real, full Mol* viewer app (sequence panel, its own controls/log,
+  // native selection + representation tools) - not a stripped-down custom
+  // canvas. We only layer the active-site click hook on top of it.
+  plugin = await createPluginUI({ target: $("viewer"), spec: DefaultPluginUISpec(), render: renderReact18 });
 
   await PluginCommands.Canvas3D.SetSettings(plugin, {
     settings: {
@@ -179,42 +162,20 @@ async function addRep(componentRef, type, color, colorParams, typeParams) {
   });
 }
 
+// Applies a sane default look once on load (and whenever the active site
+// changes, to (re)draw the orange highlight). Past that, representations are
+// the user's to manage from Mol*'s own right-hand panel - we don't fight it
+// with a competing style dropdown.
 async function styleReceptor() {
   if (!plugin || !receptorStructure) return;
   await deleteRefs(receptorComponentRefs);
   receptorComponentRefs = [];
-
-  const mode = $("styleSel").value;
   const track = (ref) => { if (ref) receptorComponentRefs.push(ref); };
 
   const polymerComp = await plugin.builders.structure.tryCreateComponentFromExpression(
     receptorStructure, Queries.polymer.expression, "polymer");
   track(polymerComp);
-
-  if (mode === "sticks") {
-    track(await addRep(polymerComp, "ball-and-stick", "element-symbol", undefined, { sizeFactor: 0.2 }));
-  } else if (mode === "line") {
-    track(await addRep(polymerComp, "line", "element-symbol"));
-  } else {
-    track(await addRep(polymerComp, "cartoon", "chain-id", undefined, { opacity: 0.92 }));
-  }
-
-  if (mode === "cartoon+sticks") {
-    const c = boxCenter();
-    if (c) {
-      const r = Math.max(...boxSize()) / 2;
-      const pocketExpr = MS.struct.modifier.exceptBy({
-        0: MS.struct.modifier.includeSurroundings({
-          0: Queries.ligand.expression, radius: r, "as-whole-residues": true,
-        }),
-        by: Queries.ligand.expression,
-      });
-      const pocketComp = await plugin.builders.structure.tryCreateComponentFromExpression(
-        receptorStructure, pocketExpr, "pocket");
-      track(pocketComp);
-      track(await addRep(pocketComp, "ball-and-stick", "element-symbol", undefined, { sizeFactor: 0.2 }));
-    }
-  }
+  track(await addRep(polymerComp, "cartoon", "chain-id", undefined, { opacity: 0.92 }));
 
   // bound ligands / cofactors — always sticks so they stay clickable
   const ligandExpr = MS.struct.combinator.merge([Queries.ligand.expression, Queries.ion.expression]);
@@ -222,17 +183,6 @@ async function styleReceptor() {
     receptorStructure, ligandExpr, "ligands");
   track(ligandComp);
   track(await addRep(ligandComp, "ball-and-stick", "uniform", { value: Color(0x4caf50) }, { sizeFactor: 0.25 }));
-
-  if ($("showWaters").checked) {
-    const waterComp = await plugin.builders.structure.tryCreateComponentFromExpression(
-      receptorStructure, Queries.water.expression, "waters");
-    track(waterComp);
-    track(await addRep(waterComp, "spacefill", "uniform", { value: Color(0x5aa9ff) }, { sizeFactor: 0.25 }));
-  }
-
-  if ($("showSurface").checked) {
-    track(await addRep(polymerComp, "molecular-surface", "uniform", { value: Color(0x3a4552) }, { alpha: 0.65 }));
-  }
 
   if (S.activeHet) {
     const activeComp = await plugin.builders.structure.tryCreateComponentFromExpression(
@@ -649,51 +599,6 @@ function selectPose(idx) {
 }
 
 // ---------------------------------------------------------------------------
-// camera helpers
-// ---------------------------------------------------------------------------
-
-function zoomBy(factor) {
-  if (!plugin?.canvas3d) return;
-  try {
-    const cam = plugin.canvas3d.camera;
-    const delta = Vec3.zero();
-    Vec3.sub(delta, cam.state.position, cam.state.target);
-    Vec3.scale(delta, delta, factor);
-    const position = Vec3.zero();
-    Vec3.add(position, cam.state.target, delta);
-    cam.setState({ position }, 0);
-    plugin.canvas3d.requestDraw();
-  } catch (err) {
-    console.warn("zoom failed", err);
-  }
-}
-
-function toggleSpin() {
-  if (!plugin?.canvas3d) return;
-  spinning = !spinning;
-  plugin.canvas3d.setProps({
-    trackball: {
-      animate: spinning
-        ? { name: "spin", params: { speed: 0.4, axis: Vec3.create(0, 1, 0) } }
-        : { name: "off", params: {} },
-    },
-  });
-  $("spinBtn").classList.toggle("active", spinning);
-}
-
-function takeSnapshot() {
-  try {
-    const canvas = plugin.canvas3dContext.canvas;
-    const a = document.createElement("a");
-    a.href = canvas.toDataURL("image/png");
-    a.download = `${(S.receptor && S.receptor.id) || "view"}.png`;
-    a.click();
-  } catch (err) {
-    toast(err.message, true);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // wiring
 // ---------------------------------------------------------------------------
 
@@ -765,24 +670,11 @@ function wire() {
   };
 
   ["cx", "cy", "cz", "sx", "sy", "sz"].forEach((id) => ($(id).oninput = drawBox));
-  $("styleSel").onchange = styleReceptor;
-  $("showSurface").onchange = styleReceptor;
-  $("showWaters").onchange = styleReceptor;
-  $("resetView").onclick = () => plugin.canvas3d?.requestCameraReset();
-  $("zoomInBtn").onclick = () => zoomBy(0.8);
-  $("zoomOutBtn").onclick = () => zoomBy(1.25);
   $("zoomSiteBtn").onclick = () => {
     if (S.activeHet) zoomToExpression(hetExpr(S.activeHet));
     else if (S.picks.length) toast("zoom not available for free-hand picks yet - drag/scroll to frame the box", true);
     else toast("set a docking box first", true);
   };
-  $("spinBtn").onclick = toggleSpin;
-  $("fullscreenBtn").onclick = () => {
-    const el = $("viewer");
-    if (document.fullscreenElement) document.exitFullscreen();
-    else el.requestFullscreen?.();
-  };
-  $("snapshotBtn").onclick = takeSnapshot;
 
   $("runBtn").onclick = runDocking;
   $("cancelBtn").onclick = async () => {

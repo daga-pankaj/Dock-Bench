@@ -92,10 +92,15 @@ so they run without smina or gnina installed.
 
 ## Frontend viewer build
 
-The 3D viewer is [Mol*](https://molstar.org/) (custom minimal canvas — no
-default panels, just the app's own buttons), imported as a real ES module in
-`frontend/src/app.js` and bundled with esbuild into `frontend/app.js`, the
-plain script `index.html` loads. `./setup.sh` / `setup.ps1` run this for you;
+The 3D viewer is the full [Mol*](https://molstar.org/) app itself (its own
+sequence panel, right-hand controls, log, selection/measurement tools —
+same as molstar.org, not a stripped-down embed), imported as a real ES
+module in `frontend/src/app.js` and bundled with esbuild into
+`frontend/app.js`, the plain script `index.html` loads. App-specific bits
+(fetch/upload receptor, click-a-HETATM-to-box, ligand list, run docking,
+job results) are layered on top via `plugin.behaviors.interaction.click`
+and Mol*'s structure builders; representation/style/surface/waters are
+left to Mol*'s own panel rather than duplicated in our UI. `./setup.sh` / `setup.ps1` run this for you;
 to rebuild by hand after editing `src/app.js`:
 ```bash
 cd frontend
