@@ -28,11 +28,11 @@
         <span id="receptorInfo" class="muted">no receptor loaded</span>
       </div>
       <div class="row checks">
-        <label><input type="checkbox" id="showSurface"> surface</label>
-        <label><input type="checkbox" id="showWaters"> waters (view)</label>
         <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
         <label><input type="checkbox" id="trimChains"> drop extra monomers far from site</label>
       </div>
+      <p class="muted small">Surface/waters/style etc. are all in the viewer's own
+        panel (right side) - this is the full Mol* app, not a stripped-down view.</p>
     </div>
 
     <div class="card">
@@ -113,19 +113,7 @@
       <div class="row viewer-head">
         <h2>Viewer</h2>
         <div class="row tight">
-          <select id="styleSel">
-            <option value="cartoon">cartoon</option>
-            <option value="cartoon+sticks">cartoon + site sticks</option>
-            <option value="sticks">sticks</option>
-            <option value="line">lines</option>
-          </select>
-          <button id="resetView" class="ghost">reset view</button>
-          <button id="zoomInBtn" class="ghost" title="zoom in">+</button>
-          <button id="zoomOutBtn" class="ghost" title="zoom out">-</button>
           <button id="zoomSiteBtn" class="ghost" title="zoom to docking box">site</button>
-          <button id="spinBtn" class="ghost" title="toggle auto-spin">spin</button>
-          <button id="fullscreenBtn" class="ghost" title="fullscreen">&#x26F6;</button>
-          <button id="snapshotBtn" class="ghost" title="save PNG snapshot">PNG</button>
         </div>
       </div>
       <div id="viewer"></div>
