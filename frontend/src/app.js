@@ -109,6 +109,12 @@ async function initViewer() {
   plugin.behaviors.interaction.click.subscribe(onPluginClick);
 }
 
+// Residue name used by the synthetic box-wireframe / pick-marker atoms
+// (see drawBox/rebuildPicks below) — clicks landing on our own overlay
+// geometry must be ignored, the same way NGL's shape/buffer primitives were
+// never atom-pickable in the first place.
+const SYNTHETIC_RESNAMES = new Set(["BOX", "PIK"]);
+
 function onPluginClick(event) {
   try {
     const loci = event.current.loci;
@@ -117,11 +123,14 @@ function onPluginClick(event) {
     StructureElement.Loci.getFirstLocation(loci, loc);
     if (!loc.unit) return;
 
+    const resn = StructureProperties.atom.label_comp_id(loc);
+    if (SYNTHETIC_RESNAMES.has(resn)) return;
+
     const p = Vec3.zero();
     loc.unit.conformation.position(loc.element, p);
 
     onAtomClick({
-      resn: StructureProperties.atom.label_comp_id(loc),
+      resn,
       hetflag: StructureProperties.residue.group_PDB(loc) === "HETATM",
       chain: StructureProperties.chain.auth_asym_id(loc),
       resi: StructureProperties.residue.auth_seq_id(loc),
@@ -290,7 +299,7 @@ async function drawBox() {
       const j = i ^ (1 << bit);
       if (j <= i) continue;
       for (const p of edgePoints(corner(i), corner(j))) {
-        lines.push(pdbAtomLine(serial, "C", "BOX", "Z", 1, p[0], p[1], p[2], "C"));
+        lines.push(pdbAtomLine(serial, "C", "BOX", "Z", serial, p[0], p[1], p[2], "C"));
         serial++;
       }
     }
@@ -821,5 +830,10 @@ async function boot() {
     $("engine").textContent = "backend unreachable";
   }
 }
+
+// Read-only debug hook (mirrors the pattern Mol*'s own apps use, e.g.
+// window.DockingViewer) - lets the browser console or a test script inspect
+// live state without poking at internals.
+window.__docking = { get S() { return S; }, get plugin() { return plugin; } };
 
 boot();

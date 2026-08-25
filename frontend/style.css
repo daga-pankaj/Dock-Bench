@@ -131,6 +131,7 @@ button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
    case a stray corner control still renders. */
 #viewer .msp-viewport-controls,
 #viewer .msp-highlight-toast-wrapper,
+#viewer .msp-background-tasks,
 #viewer .msp-layout-top,
 #viewer .msp-layout-bottom,
 #viewer .msp-layout-left {
