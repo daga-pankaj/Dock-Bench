@@ -65,6 +65,31 @@ def test_clean_receptor_keeps_metals_by_default():
     assert " ZN " in cleaned or "ZN A 102" in cleaned
 
 
+TWO_CHAIN_PDB = RECEPTOR_PDB.replace("END\n", "") + """\
+ATOM     10 N    ALA B   1     111.000 113.000 110.000                       N
+ATOM     11 CA   ALA B   1     112.000 113.000 110.000                       C
+END
+"""
+
+
+def test_clean_receptor_keeps_all_chains_without_site_center():
+    cleaned = prep.clean_receptor(TWO_CHAIN_PDB)
+    assert "ALA B" in cleaned
+
+
+def test_clean_receptor_drops_chains_far_from_site_center():
+    # LIG:A:200 sits around (10, 10.5, 10.5); chain B is ~170 A away.
+    cleaned = prep.clean_receptor(TWO_CHAIN_PDB, keep_het=("LIG",), site_center=(10.0, 10.5, 10.5))
+    assert "ALA A" in cleaned
+    assert "LIG" in cleaned
+    assert "ALA B" not in cleaned
+
+
+def test_chains_near_point_finds_only_close_chains():
+    near = prep.chains_near_point(TWO_CHAIN_PDB, center=(10.0, 10.5, 10.5), cutoff=15.0)
+    assert near == {"A"}
+
+
 def test_parse_smiles_block_names_and_dedupes():
     text = "CCO ethanol\nCCO ethanol\nc1ccccc1\n"
     specs = prep.parse_smiles_block(text)

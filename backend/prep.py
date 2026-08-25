@@ -101,18 +101,48 @@ def list_het_ligands(pdb_text: str, min_atoms: int = 4) -> list[HetLigand]:
     return out
 
 
+def chains_near_point(
+    pdb_text: str, center: tuple[float, float, float], cutoff: float = 15.0
+) -> set[str]:
+    """Chain IDs with at least one atom within `cutoff` A of `center`.
+
+    Crystal asymmetric units often hold several copies of the same protein
+    (or unrelated neighbour chains); this finds the ones actually touching
+    the chosen site so the rest can be dropped as "extra monomers".
+    """
+    cx, cy, cz = center
+    cutoff2 = cutoff * cutoff
+    near: set[str] = set()
+    for tag, line in _atom_records(pdb_text):
+        chain = line[21].strip() or "_"
+        if chain in near:
+            continue
+        x, y, z = _xyz(line)
+        if (x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2 <= cutoff2:
+            near.add(chain)
+    return near
+
+
 def clean_receptor(
     pdb_text: str,
     keep_waters: bool = False,
     keep_metals: bool = True,
     keep_het: Iterable[str] = (),
+    site_center: tuple[float, float, float] | None = None,
+    chain_cutoff: float = 15.0,
 ) -> str:
     """Strip everything smina should not treat as the rigid receptor.
 
     Keeps all ATOM records, drops alternate locations other than A, and keeps
     only the HETATM groups explicitly requested (plus metals, by default).
+
+    When `site_center` is given, whole chains with no atom within
+    `chain_cutoff` A of it are dropped too - extra copies of the protein (or
+    other neighbour chains) elsewhere in the asymmetric unit that cannot
+    reach the docking box anyway.
     """
     keep_het = {k.upper() for k in keep_het}
+    keep_chains = chains_near_point(pdb_text, site_center, chain_cutoff) if site_center else None
     kept: list[str] = []
     for line in pdb_text.splitlines():
         tag = line[:6].strip()
@@ -120,6 +150,10 @@ def clean_receptor(
             continue
         if tag not in ("ATOM", "HETATM"):
             continue
+        if keep_chains is not None:
+            chain = line[21].strip() or "_"
+            if chain not in keep_chains:
+                continue
         altloc = line[16]
         if altloc not in (" ", "A"):
             continue

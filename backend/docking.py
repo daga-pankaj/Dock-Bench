@@ -13,14 +13,24 @@ from . import config
 RDLogger.DisableLog("rdApp.*")
 
 SCORING_FUNCTIONS = ("vina", "vinardo", "dkoes_scoring", "ad4_scoring")
+ENGINES = ("smina", "gnina")
 
 
 class SminaNotFound(RuntimeError):
     pass
 
 
+class GninaNotFound(RuntimeError):
+    pass
+
+
 class SminaFailed(RuntimeError):
     pass
+
+
+# Raised for a nonzero exit from either engine; kept under the historical
+# name since callers/tests already match on it.
+DockingFailed = SminaFailed
 
 
 @dataclass
@@ -31,12 +41,24 @@ class Pose:
     rmsd_ub: float | None
 
 
-def smina_version() -> str:
-    exe = config.find_smina()
+def _find_engine(engine: str) -> str:
+    finder = config.find_gnina if engine == "gnina" else config.find_smina
+    exe = finder()
     if not exe:
-        raise SminaNotFound("smina executable not found; run ./setup.sh")
+        exc = GninaNotFound if engine == "gnina" else SminaNotFound
+        raise exc(f"{engine} executable not found; run ./setup.sh")
+    return exe
+
+
+def engine_version(engine: str = "smina") -> str:
+    exe = _find_engine(engine)
     out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)
-    return (out.stdout or out.stderr).strip().splitlines()[0] if (out.stdout or out.stderr) else "smina"
+    return (out.stdout or out.stderr).strip().splitlines()[0] if (out.stdout or out.stderr) else engine
+
+
+# Kept for callers that only ever cared about smina.
+def smina_version() -> str:
+    return engine_version("smina")
 
 
 def build_command(
@@ -51,13 +73,15 @@ def build_command(
     seed: int = 42,
     scoring: str = "vina",
     cpu: int = 1,
+    engine: str = "smina",
+    use_gpu: bool = True,
 ) -> list[str]:
-    exe = config.find_smina()
-    if not exe:
-        raise SminaNotFound("smina executable not found; run ./setup.sh")
+    if engine not in ENGINES:
+        raise ValueError(f"unknown docking engine: {engine}")
+    exe = _find_engine(engine)
     if scoring not in SCORING_FUNCTIONS:
         raise ValueError(f"unknown scoring function: {scoring}")
-    return [
+    cmd = [
         exe,
         "--receptor", str(receptor),
         "--ligand", str(ligand),
@@ -76,6 +100,11 @@ def build_command(
         "--cpu", str(cpu),
         "--quiet",
     ]
+    # smina has no GPU path at all; gnina uses one by default when a CUDA
+    # device is present unless told not to.
+    if engine == "gnina" and not use_gpu:
+        cmd.append("--no_gpu")
+    return cmd
 
 
 def parse_poses(sdf_path: Path) -> list[Pose]:

@@ -47,6 +47,8 @@ class JobParams:
     energy_range: float = 4.0
     seed: int = 42
     scoring: str = "vina"
+    engine: str = "smina"
+    use_gpu: bool = True
 
 
 class Job:
@@ -99,6 +101,8 @@ class Job:
                 "energy_range": self.params.energy_range,
                 "seed": self.params.seed,
                 "scoring": self.params.scoring,
+                "engine": self.params.engine,
+                "use_gpu": self.params.use_gpu,
             },
             "n_ligands": len(self.ligands),
             "n_finished": done,
@@ -133,6 +137,8 @@ class Job:
             energy_range=data["params"]["energy_range"],
             seed=data["params"]["seed"],
             scoring=data["params"]["scoring"],
+            engine=data["params"].get("engine", "smina"),
+            use_gpu=data["params"].get("use_gpu", True),
         )
         ligands = []
         for lig in data["ligands"]:
@@ -263,6 +269,8 @@ class JobManager:
                 energy_range=job.params.energy_range,
                 seed=job.params.seed,
                 scoring=job.params.scoring,
+                engine=job.params.engine,
+                use_gpu=job.params.use_gpu,
                 cpu=1,
             )
             scores = [p.affinity for p in poses if p.affinity is not None]

@@ -42,15 +42,52 @@ if AUTH_PASS is None and os.environ.get("DOCKING_REQUIRE_AUTH"):
     AUTH_GENERATED = True
 
 
+def _tool_candidates(tool: str) -> list[Path]:
+    """Where setup.sh/setup.ps1 could have put a compiled tool in TOOL_ENV.
+
+    Unix micromamba envs put compiled binaries at <prefix>/bin/<tool>; Windows
+    conda-forge packages put them under <prefix>\\Library\\bin\\<tool>.exe.
+    """
+    if os.name == "nt":
+        return [
+            TOOL_ENV / "Library" / "bin" / f"{tool}.exe",
+            TOOL_ENV / "Scripts" / f"{tool}.exe",
+            TOOL_ENV / f"{tool}.exe",
+        ]
+    return [TOOL_ENV / "bin" / tool]
+
+
 def find_smina() -> str | None:
     """Locate the smina executable: explicit override, local env, then PATH."""
     override = os.environ.get("SMINA_BIN")
     if override and Path(override).exists():
         return override
-    local = TOOL_ENV / "bin" / "smina"
-    if local.exists():
-        return str(local)
+    for candidate in _tool_candidates("smina"):
+        if candidate.exists():
+            return str(candidate)
     return shutil.which("smina")
+
+
+def find_gnina() -> str | None:
+    """Locate the gnina executable: explicit override, local env, then PATH.
+
+    gnina is a smina/Vina fork that can run its CNN scoring on a CUDA GPU
+    (falling back to CPU automatically when none is present). Upstream ships
+    no Windows build, so this only ever resolves there via SMINA_BIN-style
+    override or PATH (e.g. a WSL passthrough shim).
+    """
+    override = os.environ.get("GNINA_BIN")
+    if override and Path(override).exists():
+        return override
+    for candidate in _tool_candidates("gnina"):
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("gnina")
+
+
+def has_nvidia_gpu() -> bool:
+    """Best-effort local hint for the UI; gnina itself decides at run time."""
+    return shutil.which("nvidia-smi") is not None
 
 
 def ensure_dirs() -> None:
