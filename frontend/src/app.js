@@ -10,6 +10,7 @@ import { createPluginUI } from "molstar/lib/mol-plugin-ui/index";
 import { renderReact18 } from "molstar/lib/mol-plugin-ui/react18";
 import { DefaultPluginUISpec } from "molstar/lib/mol-plugin-ui/spec";
 import { PluginCommands } from "molstar/lib/mol-plugin/commands";
+import { PluginConfig } from "molstar/lib/mol-plugin/config";
 import { Structure, StructureElement, StructureProperties } from "molstar/lib/mol-model/structure";
 import { StructureSelectionQueries as Queries } from "molstar/lib/mol-plugin-state/helpers/structure-selection-query";
 import { PluginStateObject as PSO, PluginStateTransform } from "molstar/lib/mol-plugin-state/objects";
@@ -118,8 +119,24 @@ async function deleteRefs(refs) {
 async function initViewer() {
   // The real, full Mol* viewer app (sequence panel, its own controls/log,
   // native selection + representation tools) - not a stripped-down custom
-  // canvas. We only layer the active-site click hook on top of it.
-  plugin = await createPluginUI({ target: $("viewer"), spec: DefaultPluginUISpec(), render: renderReact18 });
+  // canvas. We only layer the active-site click hook on top of it, plus one
+  // override: Mol*'s default spec wires a "remote state" feature that saves/
+  // loads session state to a public server (webchem.ncbr.muni.cz) run by the
+  // Mol* project - out of place in a tool that's otherwise entirely local
+  // (see README: "no external services beyond fetching PDB files from RCSB").
+  // Drop the panel AND blank the server URLs, so there's no leftover path to
+  // it (a config value, not just a hidden button).
+  const defaultSpec = DefaultPluginUISpec();
+  const spec = {
+    ...defaultSpec,
+    components: { ...defaultSpec.components, remoteState: "none" },
+    config: [
+      ...(defaultSpec.config || []),
+      [PluginConfig.State.DefaultServer, ""],
+      [PluginConfig.State.CurrentServer, ""],
+    ],
+  };
+  plugin = await createPluginUI({ target: $("viewer"), spec, render: renderReact18 });
 
   await PluginCommands.Canvas3D.SetSettings(plugin, {
     settings: {
