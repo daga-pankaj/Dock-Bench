@@ -10,12 +10,47 @@ import { createPluginUI } from "molstar/lib/mol-plugin-ui/index";
 import { renderReact18 } from "molstar/lib/mol-plugin-ui/react18";
 import { DefaultPluginUISpec } from "molstar/lib/mol-plugin-ui/spec";
 import { PluginCommands } from "molstar/lib/mol-plugin/commands";
-import { StructureElement, StructureProperties } from "molstar/lib/mol-model/structure";
+import { Structure, StructureElement, StructureProperties } from "molstar/lib/mol-model/structure";
 import { StructureSelectionQueries as Queries } from "molstar/lib/mol-plugin-state/helpers/structure-selection-query";
+import { PluginStateObject as PSO, PluginStateTransform } from "molstar/lib/mol-plugin-state/objects";
+import { InteractionsRepresentationProvider } from "molstar/lib/mol-model-props/computed/representations/interactions";
+import { InteractionTypeColorThemeProvider } from "molstar/lib/mol-model-props/computed/themes/interaction-type";
 import { MolScriptBuilder as MS } from "molstar/lib/mol-script/language/builder";
 import { Color } from "molstar/lib/mol-util/color";
 import { Vec3 } from "molstar/lib/mol-math/linear-algebra";
+import { StateObject } from "molstar/lib/mol-state";
+import { Task } from "molstar/lib/mol-task";
+import { ParamDefinition as PD } from "molstar/lib/mol-util/param-definition";
 import "molstar/lib/mol-util/polyfill";
+
+// Combines two already-loaded structures (receptor + one docked pose) into a
+// single Structure so Mol*'s non-covalent-interactions computation - which
+// only looks within one Structure - can see contacts between them. Adapted
+// verbatim from Mol*'s own src/apps/docking-viewer/index.ts.
+const MergeStructures = PluginStateTransform.BuiltIn({
+  name: "docking-bench-merge-structures",
+  display: { name: "Merge Structures", description: "Merge Structure" },
+  from: PSO.Root,
+  to: PSO.Molecule.Structure,
+  params: {
+    structures: PD.ObjectList({ ref: PD.Text("") }, ({ ref }) => ref, { isHidden: true }),
+  },
+})({
+  apply({ params, dependencies }) {
+    return Task.create("Merge Structures", async () => {
+      if (params.structures.length === 0) return StateObject.Null;
+      const first = dependencies[params.structures[0].ref].data;
+      const builder = Structure.Builder({ masterModel: first.models[0] });
+      for (const { ref } of params.structures) {
+        const s = dependencies[ref].data;
+        for (const unit of s.units) {
+          builder.addUnit(unit.kind, unit.model, unit.conformation.operator, unit.elements, unit.traits);
+        }
+      }
+      return new PSO.Molecule.Structure(builder.getStructure(), { label: "Merged Structure" });
+    });
+  },
+});
 
 const $ = (id) => document.getElementById(id);
 
@@ -39,6 +74,8 @@ let receptorComponentRefs = []; // components (+ their reps) built by styleRecep
 let boxRefs = [];                // state refs for the docking-box wireframe structure
 let picksRefs = [];              // state refs for the pick-point markers structure
 let poseStructureRefs = [];      // top-level structure refs, one per pose (for teardown)
+let poseStructures = [];         // Structure selectors, one per pose (for the interactions merge below)
+let interactionRefs = [];        // merged receptor+pose structure showing the active pose's contacts
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -539,8 +576,11 @@ function renderJob(job) {
 // ---------------------------------------------------------------------------
 
 async function clearPoses() {
+  await deleteRefs(interactionRefs);
+  interactionRefs = [];
   await deleteRefs(poseStructureRefs);
   poseStructureRefs = [];
+  poseStructures = [];
   S.poseReps = [];
   $("poseBar").classList.add("hidden");
 }
@@ -558,8 +598,11 @@ async function showPoses(lig) {
       const trajectory = await plugin.builders.structure.parseTrajectory(data, "sdf");
       const model = await plugin.builders.structure.createModel(trajectory);
       const structure = await plugin.builders.structure.createStructure(model);
-      const rep = await addRep(structure, "ball-and-stick", "uniform", { value: Color(0x4dd0e1) }, { sizeFactor: 0.16 });
+      // atom-type (element-symbol / "CPK") coloring, same scheme molecular
+      // viewers usually mean by "color by atom type"
+      const rep = await addRep(structure, "ball-and-stick", "element-symbol", undefined, { sizeFactor: 0.16 });
       poseStructureRefs.push(data, trajectory, model, structure);
+      poseStructures.push(structure);
       S.poseReps.push(rep);
     }
 
@@ -596,6 +639,31 @@ function selectPose(idx) {
   document.querySelectorAll("#poseBar .pose").forEach((b, i) => {
     b.classList.toggle("active", i === (idx === -1 ? S.poseReps.length : idx));
   });
+  // "all" (idx -1) has no single pose to show contacts for; a specific pose does.
+  showInteractions(idx).catch((err) => console.warn("interactions failed", err));
+}
+
+// Non-covalent contacts (H-bonds, hydrophobic, ionic, ...) between the given
+// pose and the receptor - drawn as dashed lines, colored by interaction
+// type. Computed on a merged copy of (receptor + that one pose) since Mol*'s
+// interaction analysis only looks within a single Structure.
+async function showInteractions(idx) {
+  await deleteRefs(interactionRefs);
+  interactionRefs = [];
+  if (idx < 0 || !receptorStructure || !poseStructures[idx]) return;
+  try {
+    const structures = [{ ref: receptorStructure.ref }, { ref: poseStructures[idx].ref }];
+    const merged = await plugin.state.data.build().toRoot()
+      .apply(MergeStructures, { structures }, { dependsOn: structures.map((s) => s.ref) })
+      .commit();
+    const ligandComp = await plugin.builders.structure.tryCreateComponentFromExpression(
+      merged, Queries.ligand.expression, "pose-ligand");
+    await addRep(ligandComp, InteractionsRepresentationProvider, InteractionTypeColorThemeProvider,
+      undefined, { includeParent: true, parentDisplay: "between" });
+    interactionRefs = [merged];
+  } catch (err) {
+    console.warn("interactions failed", err);
+  }
 }
 
 // ---------------------------------------------------------------------------
