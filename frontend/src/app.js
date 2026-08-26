@@ -67,6 +67,7 @@ const S = {
   selectedLigand: null,
   poseReps: [],        // Mol* representation refs, one per pose currently shown
   activePose: 0,
+  hideOrigLigand: false, // hide co-crystallized ligand from the complex
 };
 
 let plugin = null;
@@ -226,7 +227,7 @@ async function styleReceptor() {
   await deleteRefs(receptorComponentRefs);
   receptorComponentRefs = [];
   const track = (ref) => { if (ref) receptorComponentRefs.push(ref); };
-  const hideOrig = $("hideOrigLigand").checked;
+  const hideOrig = S.hideOrigLigand;
   const hideIfOrig = (rep) => {
     if (rep && hideOrig) plugin.state.data.updateCellState(rep.ref, { isHidden: true });
   };
@@ -779,7 +780,11 @@ function wire() {
   });
 
   $("clearPicks").onclick = clearPicks;
-  $("hideOrigLigand").onchange = styleReceptor;
+  $("hideLigandBtn").onclick = () => {
+    S.hideOrigLigand = !S.hideOrigLigand;
+    $("hideLigandBtn").classList.toggle("active", S.hideOrigLigand);
+    styleReceptor();
+  };
   $("cubeBtn").onclick = () => {
     const s = boxSize().filter(Number.isFinite);
     if (!s.length) return;
