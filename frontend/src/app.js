@@ -55,6 +55,11 @@ const MergeStructures = PluginStateTransform.BuiltIn({
 
 const $ = (id) => document.getElementById(id);
 
+// Docking-parameter defaults. Peptides/peptidomimetics are floppier and need
+// a much wider conformer search than a typical small-molecule ligand.
+const STANDARD_DOCKING_PARAMS = { exhaustiveness: 8, energy_range: 4 };
+const PEPTIDE_DOCKING_PARAMS = { exhaustiveness: 64, energy_range: 10 };
+
 const S = {
   receptor: null,      // {id, name, het_ligands, n_protein_atoms}
   pdbText: "",
@@ -778,6 +783,12 @@ function wire() {
       S.pickMode = b.dataset.mode;
     };
   });
+
+  $("peptideMode").onchange = (e) => {
+    const params = e.target.checked ? PEPTIDE_DOCKING_PARAMS : STANDARD_DOCKING_PARAMS;
+    $("exh").value = params.exhaustiveness;
+    $("erange").value = params.energy_range;
+  };
 
   $("clearPicks").onclick = clearPicks;
   $("hideLigandBtn").onclick = () => {
