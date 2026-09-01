@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rdkit import Chem, RDLogger
 
 from . import config
+from . import pharmacophore as pharm
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -39,6 +40,10 @@ class Pose:
     affinity: float | None
     rmsd_lb: float | None
     rmsd_ub: float | None
+    # Populated only when dock()/parse_poses() is given constraints; otherwise
+    # left at these defaults and the pose order is untouched.
+    constraint_satisfied: bool | None = None
+    constraint_detail: list[dict] = field(default_factory=list)
 
 
 def _find_engine(engine: str) -> str:
@@ -107,12 +112,20 @@ def build_command(
     return cmd
 
 
-def parse_poses(sdf_path: Path) -> list[Pose]:
-    """Read the scores smina writes as SDF properties on each pose."""
+def parse_poses(sdf_path: Path, constraints: list[pharm.Constraint] | None = None) -> list[Pose]:
+    """Read the scores smina writes as SDF properties on each pose.
+
+    When `constraints` is given, each pose is also checked geometrically
+    against every constraint (see backend.pharmacophore) and the list is then
+    reordered: poses meeting every *required* constraint sort first, ties
+    broken by affinity plus a penalty for how far the soft/failed ones miss
+    by. Ranks are renumbered to match the new order.
+    """
     poses: list[Pose] = []
     if not sdf_path.exists():
         return poses
     supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    penalties: list[float] = []
     for i, mol in enumerate(supplier, start=1):
         if mol is None:
             continue
@@ -125,14 +138,40 @@ def parse_poses(sdf_path: Path) -> list[Pose]:
             except ValueError:
                 return None
 
-        poses.append(
-            Pose(
-                rank=i,
-                affinity=prop("minimizedAffinity"),
-                rmsd_lb=prop("minimizedRMSD"),
-                rmsd_ub=prop("RMSD"),
-            )
+        pose = Pose(
+            rank=i,
+            affinity=prop("minimizedAffinity"),
+            rmsd_lb=prop("minimizedRMSD"),
+            rmsd_ub=prop("RMSD"),
         )
+        pen = 0.0
+        if constraints:
+            # The supplier skips sanitization (smina's SDF output can trip
+            # RDKit's valence checks); the donor/acceptor SMARTS need ring
+            # and valence info to match, so sanitize defensively per-pose and
+            # fall back to "unknown" constraint state if that fails.
+            try:
+                Chem.SanitizeMol(mol)
+                results = pharm.evaluate(mol, constraints)
+                pose.constraint_detail = [r.as_dict() for r in results]
+                pose.constraint_satisfied = pharm.all_required_met(results)
+                pen = pharm.penalty(results, constraints)
+            except Exception:
+                pose.constraint_satisfied = None
+        penalties.append(pen)
+        poses.append(pose)
+
+    if constraints:
+        order = sorted(
+            range(len(poses)),
+            key=lambda idx: (
+                not (poses[idx].constraint_satisfied in (True, None)),
+                (poses[idx].affinity or 0.0) + penalties[idx],
+            ),
+        )
+        poses = [poses[idx] for idx in order]
+        for rank, pose in enumerate(poses, start=1):
+            pose.rank = rank
     return poses
 
 
@@ -143,9 +182,10 @@ def dock(
     center: tuple[float, float, float],
     size: tuple[float, float, float],
     log_path: Path | None = None,
+    constraints: list[pharm.Constraint] | None = None,
     **kwargs,
 ) -> list[Pose]:
-    """Dock one ligand and return its poses, best first."""
+    """Dock one ligand and return its poses, best first (or best-constrained-first, see parse_poses)."""
     cmd = build_command(receptor, ligand_sdf, out_sdf, center, size, **kwargs)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=config.SMINA_TIMEOUT
@@ -157,7 +197,7 @@ def dock(
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise SminaFailed(tail[-1] if tail else f"smina exited {proc.returncode}")
-    poses = parse_poses(out_sdf)
+    poses = parse_poses(out_sdf, constraints=constraints)
     if not poses:
         raise SminaFailed("smina produced no poses (ligand may not fit the box)")
     return poses

@@ -67,6 +67,8 @@ const S = {
   pickMode: "ligand",
   picks: [],           // [x,y,z] click points in "pick atoms" mode
   activeHet: null,
+  constraints: [],     // pharmacophore constraints: {id, kind, x, y, z, radius, required, label}
+  pendingPickId: null, // constraint row currently waiting for a viewer click to set its point
   job: null,
   poll: null,
   selectedLigand: null,
@@ -80,6 +82,7 @@ let receptorStructure = null;   // StateObjectSelector for the loaded receptor S
 let receptorComponentRefs = []; // components (+ their reps) built by styleReceptor, for teardown
 let boxRefs = [];                // state refs for the docking-box wireframe structure
 let picksRefs = [];              // state refs for the pick-point markers structure
+let constraintMarkerRefs = [];   // state refs for the pharmacophore-constraint markers structure
 let poseStructureRefs = [];      // top-level structure refs, one per pose (for teardown)
 let poseStructures = [];         // Structure selectors, one per pose (for the interactions merge below)
 let interactionRefs = [];        // merged receptor+pose structure showing the active pose's contacts
@@ -157,7 +160,7 @@ async function initViewer() {
 // (see drawBox/rebuildPicks below) — clicks landing on our own overlay
 // geometry must be ignored, the same way NGL's shape/buffer primitives were
 // never atom-pickable in the first place.
-const SYNTHETIC_RESNAMES = new Set(["BOX", "PIK"]);
+const SYNTHETIC_RESNAMES = new Set(["BOX", "PIK", "PHC"]);
 
 function onPluginClick(event) {
   try {
@@ -348,6 +351,19 @@ async function rebuildPicks() {
   picksRefs = [...refs, rep].filter(Boolean);
 }
 
+async function rebuildConstraintMarkers() {
+  if (!plugin) return;
+  await deleteRefs(constraintMarkerRefs);
+  constraintMarkerRefs = [];
+  const placed = S.constraints.filter((c) => [c.x, c.y, c.z].every(Number.isFinite));
+  if (!placed.length) return;
+
+  const lines = placed.map((c, i) => pdbAtomLine(i + 1, "C", "PHC", "Z", i + 1, c.x, c.y, c.z, "C"));
+  const { structure, refs } = await loadSyntheticPdb(lines.join("\n") + "\nEND\n", "constraints");
+  const rep = await addRep(structure, "spacefill", "uniform", { value: Color(0xff6bd6) }, { sizeFactor: 0.45 });
+  constraintMarkerRefs = [...refs, rep].filter(Boolean);
+}
+
 function setBox(center, size) {
   ["cx", "cy", "cz"].forEach((id, i) => ($(id).value = center[i].toFixed(2)));
   ["sx", "sy", "sz"].forEach((id, i) => ($(id).value = Math.max(8, size[i]).toFixed(1)));
@@ -400,6 +416,21 @@ function useHet(het) {
 
 function onAtomClick(atom) {
   if (!atom) return;
+
+  // A constraint row is waiting for its point - this click sets it, no
+  // matter what the box-picking mode ("click ligand" / "pick atoms") is.
+  if (S.pendingPickId != null) {
+    const c = S.constraints.find((c) => c.id === S.pendingPickId);
+    S.pendingPickId = null;
+    if (c) {
+      c.x = atom.x; c.y = atom.y; c.z = atom.z;
+      renderConstraints();
+      rebuildConstraintMarkers();
+      toast(`constraint point set from ${atom.resn}${atom.resi} ${atom.atom}`);
+    }
+    return;
+  }
+
   const isWater = ["HOH", "WAT", "DOD"].includes((atom.resn || "").toUpperCase());
 
   if (S.pickMode === "ligand" && atom.hetflag && !isWater) {
@@ -449,9 +480,13 @@ async function loadReceptor(meta) {
   clearPoses();
   await deleteRefs(boxRefs); boxRefs = [];
   await deleteRefs(picksRefs); picksRefs = [];
+  await deleteRefs(constraintMarkerRefs); constraintMarkerRefs = [];
   if (receptorStructure) { await deleteRefs([receptorStructure]); receptorStructure = null; receptorComponentRefs = []; }
   S.picks = [];
   S.activeHet = null;
+  S.constraints = [];
+  S.pendingPickId = null;
+  renderConstraints();
 
   const data = await plugin.builders.data.rawData({ data: S.pdbText, label: meta.name });
   const trajectory = await plugin.builders.structure.parseTrajectory(data, "pdb");
@@ -493,6 +528,95 @@ function showLigands(data) {
 }
 
 // ---------------------------------------------------------------------------
+// pharmacophore constraints
+// ---------------------------------------------------------------------------
+
+let constraintSeq = 0;
+
+const CONSTRAINT_KIND_LABELS = {
+  hbond_donor: "H-bond donor",
+  hbond_acceptor: "H-bond acceptor",
+  positional: "positional (any atom)",
+};
+
+function addConstraintRow() {
+  S.constraints.push({
+    id: ++constraintSeq,
+    kind: "hbond_donor",
+    x: undefined, y: undefined, z: undefined,
+    radius: 3.5,
+    required: true,
+    label: "",
+  });
+  renderConstraints();
+}
+
+function removeConstraintRow(id) {
+  S.constraints = S.constraints.filter((c) => c.id !== id);
+  if (S.pendingPickId === id) S.pendingPickId = null;
+  renderConstraints();
+  rebuildConstraintMarkers();
+}
+
+function renderConstraints() {
+  const box = $("constraintList");
+  box.innerHTML = "";
+  S.constraints.forEach((c) => {
+    const row = document.createElement("div");
+    row.className = "constraint-row";
+    const kindOpts = Object.entries(CONSTRAINT_KIND_LABELS)
+      .map(([v, label]) => `<option value="${v}" ${v === c.kind ? "selected" : ""}>${label}</option>`)
+      .join("");
+    const pt = (v) => (Number.isFinite(v) ? v.toFixed(2) : "");
+    row.innerHTML = `
+      <select class="c-kind">${kindOpts}</select>
+      <button class="ghost c-pick" type="button">pick point</button>
+      <input class="c-x" type="number" step="0.1" placeholder="x" value="${pt(c.x)}">
+      <input class="c-y" type="number" step="0.1" placeholder="y" value="${pt(c.y)}">
+      <input class="c-z" type="number" step="0.1" placeholder="z" value="${pt(c.z)}">
+      <label class="inline">radius <input class="c-radius" type="number" step="0.1" min="0.5" max="15" value="${c.radius}"> Å</label>
+      <label class="inline"><input class="c-required" type="checkbox" ${c.required ? "checked" : ""}> required</label>
+      <input class="c-label" type="text" placeholder="label (optional)" value="${c.label}">
+      <button class="ghost c-remove" type="button" title="remove">✕</button>`;
+
+    row.querySelector(".c-kind").onchange = (e) => { c.kind = e.target.value; };
+    row.querySelector(".c-x").oninput = (e) => { c.x = parseFloat(e.target.value); rebuildConstraintMarkers(); };
+    row.querySelector(".c-y").oninput = (e) => { c.y = parseFloat(e.target.value); rebuildConstraintMarkers(); };
+    row.querySelector(".c-z").oninput = (e) => { c.z = parseFloat(e.target.value); rebuildConstraintMarkers(); };
+    row.querySelector(".c-radius").oninput = (e) => { c.radius = parseFloat(e.target.value); };
+    row.querySelector(".c-required").onchange = (e) => { c.required = e.target.checked; };
+    row.querySelector(".c-label").oninput = (e) => { c.label = e.target.value; };
+    row.querySelector(".c-pick").classList.toggle("armed", S.pendingPickId === c.id);
+    row.querySelector(".c-pick").onclick = () => {
+      S.pendingPickId = S.pendingPickId === c.id ? null : c.id;
+      renderConstraints();
+      if (S.pendingPickId != null) toast("click an atom in the viewer to set this constraint's point");
+    };
+    row.querySelector(".c-remove").onclick = () => removeConstraintRow(c.id);
+
+    box.appendChild(row);
+  });
+}
+
+// Built job-submission payload for the constraints currently defined, or
+// null (with a toast) if any row is missing its point - such a constraint
+// can't be checked against anything.
+function buildConstraintsPayload() {
+  const incomplete = S.constraints.some((c) => ![c.x, c.y, c.z].every(Number.isFinite));
+  if (incomplete) {
+    toast("a pharmacophore constraint is missing its point - pick one or remove the row", true);
+    return null;
+  }
+  return S.constraints.map((c) => ({
+    kind: c.kind,
+    point: [c.x, c.y, c.z],
+    radius: c.radius,
+    required: c.required,
+    label: c.label,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // jobs
 // ---------------------------------------------------------------------------
 
@@ -501,6 +625,8 @@ async function runDocking() {
   if (!S.ligands.length) return toast("no ligands loaded - click 'Load from box'", true);
   const center = boxCenter();
   if (!center) return toast("define the active site first", true);
+  const constraints = buildConstraintsPayload();
+  if (constraints === null) return;
 
   const body = {
     receptor_id: S.receptor.id,
@@ -516,6 +642,7 @@ async function runDocking() {
     use_gpu: $("deviceSel").value !== "cpu",
     keep_waters: $("keepWaters").checked,
     trim_distant_chains: $("trimChains").checked,
+    constraints,
   };
 
   $("runBtn").disabled = true;
@@ -563,6 +690,18 @@ function startPolling(jobId) {
   }, 1500);
 }
 
+// The badge summarizes the top-ranked pose's pharmacophore check (see
+// backend/jobs.py:_run_one); the title lists each constraint's distance so
+// hovering explains "why" without needing the log.
+function constraintBadge(lig) {
+  if (lig.constraint_satisfied === null || lig.constraint_satisfied === undefined) return "";
+  const good = lig.constraint_satisfied;
+  const detail = (lig.constraint_detail || [])
+    .map((d) => `${d.label}: ${d.distance === null ? "no matching atom" : d.distance.toFixed(2) + " Å"}${d.required ? "" : " (optional)"}`)
+    .join("\n");
+  return `<span class="tag ${good ? "done" : "unset"}" title="${detail.replace(/"/g, "&quot;")}">${good ? "✓ met" : "✗ unmet"}</span>`;
+}
+
 function renderJob(job) {
   const pct = job.n_ligands ? (100 * job.n_finished) / job.n_ligands : 0;
   $("bar").style.width = `${pct}%`;
@@ -587,6 +726,7 @@ function renderJob(job) {
       <td><span class="tag ${lig.status}">${lig.status}</span></td>
       <td class="score">${score}</td>
       <td>${lig.n_poses || ""}</td>
+      <td>${constraintBadge(lig)}</td>
       <td></td>`;
     if (lig.error) tr.querySelector("td:nth-child(2)").title = lig.error;
 
@@ -791,6 +931,7 @@ function wire() {
   };
 
   $("clearPicks").onclick = clearPicks;
+  $("addConstraint").onclick = addConstraintRow;
   $("hideLigandBtn").onclick = () => {
     S.hideOrigLigand = !S.hideOrigLigand;
     $("hideLigandBtn").classList.toggle("active", S.hideOrigLigand);

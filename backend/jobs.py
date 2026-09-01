@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, docking, prep
+from . import pharmacophore as pharm
 
 
 def _now() -> str:
@@ -32,6 +33,10 @@ class LigandRun:
     error: str | None = None
     started: str | None = None
     finished: str | None = None
+    # From the top-ranked pose only (parse_poses already sorted constraint-
+    # satisfying poses first); None when the job had no constraints.
+    constraint_satisfied: bool | None = None
+    constraint_detail: list[dict] = field(default_factory=list)
 
     @property
     def poses_file(self) -> str:
@@ -49,6 +54,9 @@ class JobParams:
     scoring: str = "vina"
     engine: str = "smina"
     use_gpu: bool = True
+    # Raw dicts (kind/point/radius/required/weight/label), not Constraint
+    # objects, so this dataclass stays plain-JSON-serialisable via asdict().
+    constraints: list[dict] = field(default_factory=list)
 
 
 class Job:
@@ -103,6 +111,7 @@ class Job:
                 "scoring": self.params.scoring,
                 "engine": self.params.engine,
                 "use_gpu": self.params.use_gpu,
+                "constraints": self.params.constraints,
             },
             "n_ligands": len(self.ligands),
             "n_finished": done,
@@ -139,6 +148,7 @@ class Job:
             scoring=data["params"]["scoring"],
             engine=data["params"].get("engine", "smina"),
             use_gpu=data["params"].get("use_gpu", True),
+            constraints=data["params"].get("constraints", []),
         )
         ligands = []
         for lig in data["ligands"]:
@@ -157,6 +167,8 @@ class Job:
                     error=error,
                     started=lig["started"],
                     finished=lig["finished"],
+                    constraint_satisfied=lig.get("constraint_satisfied"),
+                    constraint_detail=lig.get("constraint_detail", []),
                 )
             )
         job = cls(data["id"], params, ligands, data["receptor"], created=data["created"])
@@ -266,6 +278,8 @@ class JobManager:
             n_concurrent = max(1, min(len(job.ligands), config.MAX_WORKERS))
             cpu_per_ligand = max(1, config.MAX_WORKERS // n_concurrent)
 
+            constraints = [pharm.Constraint.from_dict(c) for c in job.params.constraints] or None
+
             poses = docking.dock(
                 receptor=job.receptor_path,
                 ligand_sdf=lig_path,
@@ -281,11 +295,16 @@ class JobManager:
                 engine=job.params.engine,
                 use_gpu=job.params.use_gpu,
                 cpu=cpu_per_ligand,
+                constraints=constraints,
             )
+            # poses are already best-constrained-first when constraints were
+            # given (see docking.parse_poses), so [0] is the one to report.
             scores = [p.affinity for p in poses if p.affinity is not None]
             run.scores = scores
             run.n_poses = len(poses)
             run.best_score = min(scores) if scores else None
+            run.constraint_satisfied = poses[0].constraint_satisfied
+            run.constraint_detail = poses[0].constraint_detail
             self._finish(job, run, status="done")
         except Exception as exc:  # one bad ligand must not sink the batch
             self._finish(job, run, status="failed", error=str(exc)[:400])

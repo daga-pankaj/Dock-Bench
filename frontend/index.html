@@ -75,7 +75,16 @@
     </div>
 
     <div class="card">
-      <h2>4 · Docking parameters</h2>
+      <h2>4 · Pharmacophore constraints <span class="muted small">(optional)</span></h2>
+      <p class="muted small">Checked against each pose after docking (smina/gnina have no way to bias
+        the search itself toward a point) - poses meeting every "required" constraint are ranked first.
+        Click "pick point", then click an atom in the viewer.</p>
+      <div id="constraintList" class="constraintlist"></div>
+      <button id="addConstraint" class="ghost">+ add constraint</button>
+    </div>
+
+    <div class="card">
+      <h2>5 · Docking parameters</h2>
       <div class="grid3">
         <label>exhaustiveness<input type="number" id="exh" value="8" min="1" max="64"></label>
         <label>poses kept<input type="number" id="modes" value="5" min="1" max="20"></label>
@@ -134,7 +143,7 @@
         </div>
       </div>
       <table id="results">
-        <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th></th></tr></thead>
+        <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th>constraints</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
       <p id="resultsEmpty" class="muted small">No job yet. Results appear here as each ligand finishes.</p>

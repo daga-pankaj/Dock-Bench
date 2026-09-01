@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, docking, prep
+from . import pharmacophore as pharm
 from .jobs import MANAGER, JobParams
 
 config.ensure_dirs()
@@ -92,6 +93,20 @@ class ParseRequest(BaseModel):
     text: str
 
 
+class ConstraintIn(BaseModel):
+    """One pharmacophoric constraint: an H-bond donor/acceptor or any heavy
+    atom the ligand must place within `radius` of `point` (a receptor-atom or
+    hand-picked coordinate). Checked against each pose after docking, not
+    during smina/gnina's own search - see backend/pharmacophore.py."""
+
+    kind: str
+    point: tuple[float, float, float]
+    radius: float = Field(3.5, ge=0.5, le=15.0)
+    required: bool = True
+    weight: float = Field(1.0, ge=0.0, le=20.0)
+    label: str = ""
+
+
 class JobRequest(BaseModel):
     receptor_id: str
     center: tuple[float, float, float]
@@ -108,6 +123,7 @@ class JobRequest(BaseModel):
     exclude_het: list[str] = Field(default_factory=list)
     trim_distant_chains: bool = False
     chain_cutoff: float = Field(15.0, ge=5.0, le=60.0)
+    constraints: list[ConstraintIn] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +187,7 @@ def status() -> dict:
         "workers": config.MAX_WORKERS,
         "scoring_functions": list(docking.SCORING_FUNCTIONS),
         "default_num_modes": config.DEFAULT_NUM_MODES,
+        "constraint_kinds": list(pharm.KINDS),
     }
 
 
@@ -285,6 +302,9 @@ def create_job(req: JobRequest) -> dict:
     for value in req.size:
         if not (4.0 <= value <= MAX_BOX):
             raise HTTPException(400, f"box edge {value} A outside 4-{MAX_BOX} A")
+    for c in req.constraints:
+        if c.kind not in pharm.KINDS:
+            raise HTTPException(400, f"unknown constraint kind {c.kind}")
 
     receptor_text = _receptor_path(req.receptor_id).read_text()
     cleaned = prep.clean_receptor(
@@ -310,6 +330,7 @@ def create_job(req: JobRequest) -> dict:
         scoring=req.scoring,
         engine=req.engine,
         use_gpu=req.use_gpu,
+        constraints=[c.model_dump() for c in req.constraints],
     )
     job = MANAGER.submit(cleaned, f"receptor_{req.receptor_id}", specs, params)
     return job.as_dict()
@@ -368,7 +389,10 @@ def ligand_log(job_id: str, name: str) -> Response:
 def _results_csv(job) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["name", "smiles", "status", "best_affinity_kcal_per_mol", "n_poses", "all_scores", "error"])
+    writer.writerow(
+        ["name", "smiles", "status", "best_affinity_kcal_per_mol", "n_poses",
+         "all_scores", "constraints_satisfied", "error"]
+    )
     for lig in job.ligands:
         writer.writerow(
             [
@@ -378,6 +402,7 @@ def _results_csv(job) -> str:
                 "" if lig.best_score is None else f"{lig.best_score:.2f}",
                 lig.n_poses,
                 ";".join(f"{s:.2f}" for s in lig.scores),
+                "" if lig.constraint_satisfied is None else str(lig.constraint_satisfied),
                 lig.error or "",
             ]
         )

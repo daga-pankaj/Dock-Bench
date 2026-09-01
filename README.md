@@ -17,6 +17,11 @@ bundled locally at setup time (see "Frontend viewer build" below).
 - Dock many ligands concurrently (one docking process per ligand, thread pool)
 - Pick smina or gnina as the engine per job; gnina can use a CUDA GPU when
   one's present (Linux/WSL2 only — no Windows build upstream)
+- Optional pharmacophoric constraints (H-bond donor/acceptor, or any-atom
+  "positional") checked against each pose after docking and used to rerank
+  poses toward the ones that satisfy them — smina/gnina have no way to bias
+  their own search this way, so this is post-hoc filtering/reranking, not a
+  constrained search (see `backend/pharmacophore.py`)
 - Live job progress, per-ligand poses viewable in-browser, CSV/ZIP export
 - Job history survives a server restart (state reloaded from `runs/jobs/`)
 
