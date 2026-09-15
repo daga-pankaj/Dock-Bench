@@ -120,7 +120,8 @@ class JobRequest(BaseModel):
     engine: str = "smina"
     use_gpu: bool = True
     keep_waters: bool = False
-    exclude_het: list[str] = Field(default_factory=list)
+    remove_ligand: bool = True
+    exclude_chains: list[str] = Field(default_factory=list)
     trim_distant_chains: bool = False
     chain_cutoff: float = Field(15.0, ge=5.0, le=60.0)
     constraints: list[ConstraintIn] = Field(default_factory=list)
@@ -152,6 +153,7 @@ def _store_receptor(name: str, text: str) -> dict:
         "name": name,
         "n_protein_atoms": n_protein,
         "het_ligands": [h.as_dict() for h in hets],
+        "chains": [c.as_dict() for c in prep.list_chains(text)],
     }
 
 
@@ -310,6 +312,8 @@ def create_job(req: JobRequest) -> dict:
     cleaned = prep.clean_receptor(
         receptor_text,
         keep_waters=req.keep_waters,
+        strip_ligand=req.remove_ligand,
+        exclude_chains=req.exclude_chains,
         site_center=tuple(req.center) if req.trim_distant_chains else None,
         chain_cutoff=req.chain_cutoff,
     )

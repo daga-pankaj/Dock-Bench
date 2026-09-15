@@ -119,6 +119,10 @@ button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
 .het .n { color: var(--muted); margin-left: 5px; }
 .het.active .n { color: #05121f; }
 
+.chainlist { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 110px; overflow: auto; }
+.chain-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.chain-row .n { color: var(--muted); margin-left: auto; }
+
 .ligpreview { max-height: 150px; overflow: auto; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
 .ligpreview div { padding: 2px 0; border-bottom: 1px solid #1c232c; }
 .ligpreview .bad { color: var(--bad); }

@@ -65,6 +65,16 @@ def test_clean_receptor_keeps_metals_by_default():
     assert " ZN " in cleaned or "ZN A 102" in cleaned
 
 
+def test_clean_receptor_strips_ligand_by_default():
+    cleaned = prep.clean_receptor(RECEPTOR_PDB)
+    assert "LIG" not in cleaned
+
+
+def test_clean_receptor_strip_ligand_false_keeps_it():
+    cleaned = prep.clean_receptor(RECEPTOR_PDB, strip_ligand=False)
+    assert "LIG" in cleaned
+
+
 TWO_CHAIN_PDB = RECEPTOR_PDB.replace("END\n", "") + """\
 ATOM     10 N    ALA B   1     111.000 113.000 110.000                       N
 ATOM     11 CA   ALA B   1     112.000 113.000 110.000                       C
@@ -88,6 +98,22 @@ def test_clean_receptor_drops_chains_far_from_site_center():
 def test_chains_near_point_finds_only_close_chains():
     near = prep.chains_near_point(TWO_CHAIN_PDB, center=(10.0, 10.5, 10.5), cutoff=15.0)
     assert near == {"A"}
+
+
+def test_clean_receptor_exclude_chains_drops_named_chain():
+    cleaned = prep.clean_receptor(TWO_CHAIN_PDB, exclude_chains=("B",))
+    assert "ALA A" in cleaned
+    assert "ALA B" not in cleaned
+
+
+def test_list_chains_counts_atoms_and_hetatms_biggest_first():
+    chains = prep.list_chains(TWO_CHAIN_PDB)
+    by_id = {c.chain: c for c in chains}
+    assert chains[0].chain == "A"  # chain A carries all the HETATM groups too
+    assert by_id["A"].n_atoms == 2
+    assert by_id["A"].n_hetatm == 7
+    assert by_id["B"].n_atoms == 2
+    assert by_id["B"].n_hetatm == 0
 
 
 def test_parse_smiles_block_names_and_dedupes():

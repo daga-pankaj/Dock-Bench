@@ -67,6 +67,7 @@ const S = {
   pickMode: "ligand",
   picks: [],           // [x,y,z] click points in "pick atoms" mode
   activeHet: null,
+  excludeChains: new Set(), // chain IDs to delete from the receptor before docking (e.g. a peptide ligand)
   constraints: [],     // pharmacophore constraints: {id, kind, x, y, z, radius, required, label}
   pendingPickId: null, // constraint row currently waiting for a viewer click to set its point
   job: null,
@@ -471,6 +472,32 @@ function renderHetList() {
   });
 }
 
+// Every chain, so a co-crystallized peptide/peptidomimetic ligand (its own
+// ATOM chain, invisible to list_het_ligands which only sees HETATM residues)
+// can be ticked for deletion from the receptor before docking.
+function renderChainList() {
+  const box = $("chainList");
+  box.innerHTML = "";
+  const chains = S.receptor.chains || [];
+  if (chains.length < 2) {
+    box.innerHTML = '<span class="muted small">single chain - nothing extra to exclude</span>';
+    return;
+  }
+  chains.forEach((c) => {
+    const row = document.createElement("label");
+    row.className = "chain-row";
+    const checked = S.excludeChains.has(c.chain) ? "checked" : "";
+    row.innerHTML =
+      `<input type="checkbox" ${checked}> delete chain ${c.chain}` +
+      `<span class="n">${c.n_atoms} atom(s), ${c.n_hetatm} het</span>`;
+    row.querySelector("input").onchange = (e) => {
+      if (e.target.checked) S.excludeChains.add(c.chain);
+      else S.excludeChains.delete(c.chain);
+    };
+    box.appendChild(row);
+  });
+}
+
 async function loadReceptor(meta) {
   S.receptor = meta;
   S.pdbText = await api(`/api/receptor/${meta.id}/pdb`);
@@ -484,6 +511,7 @@ async function loadReceptor(meta) {
   if (receptorStructure) { await deleteRefs([receptorStructure]); receptorStructure = null; receptorComponentRefs = []; }
   S.picks = [];
   S.activeHet = null;
+  S.excludeChains = new Set();
   S.constraints = [];
   S.pendingPickId = null;
   renderConstraints();
@@ -496,6 +524,7 @@ async function loadReceptor(meta) {
   await styleReceptor();
   plugin.canvas3d?.requestCameraReset();
   renderHetList();
+  renderChainList();
 
   // Biggest non-ion HET group is almost always the co-crystallised ligand.
   const best = (meta.het_ligands || []).find((h) => !h.is_ion);
@@ -641,6 +670,8 @@ async function runDocking() {
     engine: $("engineSel").value,
     use_gpu: $("deviceSel").value !== "cpu",
     keep_waters: $("keepWaters").checked,
+    remove_ligand: $("removeLigand").checked,
+    exclude_chains: [...S.excludeChains],
     trim_distant_chains: $("trimChains").checked,
     constraints,
   };

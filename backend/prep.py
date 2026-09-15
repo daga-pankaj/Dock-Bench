@@ -101,6 +101,47 @@ def list_het_ligands(pdb_text: str, min_atoms: int = 4) -> list[HetLigand]:
     return out
 
 
+@dataclass
+class ChainInfo:
+    """Per-chain atom counts, so the UI can offer a co-crystallized peptide/
+    peptidomimetic ligand (its own ATOM chain, not a HETATM group) for
+    exclusion from the receptor - list_het_ligands only sees HETATM residues."""
+
+    chain: str
+    n_atoms: int
+    n_hetatm: int
+    n_residues: int
+
+    def as_dict(self) -> dict:
+        return {
+            "chain": self.chain,
+            "n_atoms": self.n_atoms,
+            "n_hetatm": self.n_hetatm,
+            "n_residues": self.n_residues,
+        }
+
+
+def list_chains(pdb_text: str) -> list[ChainInfo]:
+    """Atom/residue counts per chain, biggest first (the biggest is almost
+    always the target protein; small ATOM chains are candidate peptide
+    ligands)."""
+    stats: dict[str, dict] = {}
+    for tag, line in _atom_records(pdb_text):
+        chain = line[21].strip() or "_"
+        d = stats.setdefault(chain, {"n_atoms": 0, "n_hetatm": 0, "residues": set()})
+        if tag == "HETATM":
+            d["n_hetatm"] += 1
+        else:
+            d["n_atoms"] += 1
+        d["residues"].add(line[22:27])
+    out = [
+        ChainInfo(chain, d["n_atoms"], d["n_hetatm"], len(d["residues"]))
+        for chain, d in stats.items()
+    ]
+    out.sort(key=lambda c: -(c.n_atoms + c.n_hetatm))
+    return out
+
+
 def chains_near_point(
     pdb_text: str, center: tuple[float, float, float], cutoff: float = 15.0
 ) -> set[str]:
@@ -128,13 +169,20 @@ def clean_receptor(
     keep_waters: bool = False,
     keep_metals: bool = True,
     keep_het: Iterable[str] = (),
+    strip_ligand: bool = True,
+    exclude_chains: Iterable[str] = (),
     site_center: tuple[float, float, float] | None = None,
     chain_cutoff: float = 15.0,
 ) -> str:
     """Strip everything smina should not treat as the rigid receptor.
 
-    Keeps all ATOM records, drops alternate locations other than A, and keeps
-    only the HETATM groups explicitly requested (plus metals, by default).
+    Keeps all ATOM records, drops alternate locations other than A. HETATM
+    groups (the usual co-crystallized small-molecule ligand) are dropped by
+    default (`strip_ligand=True`), except metals and anything named in
+    `keep_het`. `exclude_chains` additionally drops whole chains outright -
+    for a co-crystallized peptide/peptidomimetic ligand, which is its own
+    ATOM chain rather than a HETATM group and so isn't touched by
+    `strip_ligand`.
 
     When `site_center` is given, whole chains with no atom within
     `chain_cutoff` A of it are dropped too - extra copies of the protein (or
@@ -142,6 +190,7 @@ def clean_receptor(
     reach the docking box anyway.
     """
     keep_het = {k.upper() for k in keep_het}
+    exclude_chains = {c.upper() for c in exclude_chains}
     keep_chains = chains_near_point(pdb_text, site_center, chain_cutoff) if site_center else None
     kept: list[str] = []
     for line in pdb_text.splitlines():
@@ -150,10 +199,11 @@ def clean_receptor(
             continue
         if tag not in ("ATOM", "HETATM"):
             continue
-        if keep_chains is not None:
-            chain = line[21].strip() or "_"
-            if chain not in keep_chains:
-                continue
+        chain = line[21].strip() or "_"
+        if chain.upper() in exclude_chains:
+            continue
+        if keep_chains is not None and chain not in keep_chains:
+            continue
         altloc = line[16]
         if altloc not in (" ", "A"):
             continue
@@ -165,6 +215,8 @@ def clean_receptor(
             elif resname in keep_het:
                 pass
             elif keep_metals and resname in KEEP_METALS:
+                pass
+            elif not strip_ligand:
                 pass
             else:
                 continue
