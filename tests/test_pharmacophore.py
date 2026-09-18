@@ -68,3 +68,56 @@ def test_no_matching_atom_gives_none_distance():
     assert results[0].distance is None
     assert results[0].satisfied is False
     assert pharm.penalty(results, [c]) == pytest.approx(c.weight * c.radius * 2)
+
+
+def _benzene_ring() -> Chem.Mol:
+    mol = Chem.AddHs(Chem.MolFromSmiles("c1ccccc1"))
+    AllChem.EmbedMolecule(mol, randomSeed=1)
+    return mol
+
+
+def test_aromatic_matches_ring_centroid():
+    mol = _benzene_ring()
+    conf = mol.GetConformer()
+    centroid = pharm._ring_centroids(mol, conf)[0]
+    c = pharm.Constraint(kind="aromatic", point=centroid, radius=0.5)
+    results = pharm.evaluate(mol, [c])
+    assert results[0].satisfied
+    assert results[0].distance == pytest.approx(0.0, abs=1e-6)
+
+
+def test_aromatic_finds_no_ring_on_acyclic_molecule():
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    AllChem.EmbedMolecule(mol, randomSeed=1)
+    c = pharm.Constraint(kind="aromatic", point=(0, 0, 0))
+    results = pharm.evaluate(mol, [c])
+    assert results[0].distance is None
+
+
+def test_metal_coordination_reuses_acceptor_atoms():
+    mol = _phenol()
+    conf = mol.GetConformer()
+    idx = next(iter(pharm._candidate_atoms(mol, "metal_coordination")))
+    p = conf.GetAtomPosition(idx)
+    c = pharm.Constraint(kind="metal_coordination", point=(p.x, p.y, p.z), radius=0.5)
+    results = pharm.evaluate(mol, [c])
+    assert results[0].satisfied
+
+
+def test_smarts_constraint_matches_pattern():
+    mol = _phenol()
+    conf = mol.GetConformer()
+    # Match the phenolic oxygen directly by pattern rather than the built-in kinds.
+    c = pharm.Constraint(kind="smarts", smarts="[OX2H]", point=(0, 0, 0), radius=100)
+    results = pharm.evaluate(mol, [c])
+    assert results[0].distance is not None
+
+
+def test_smarts_constraint_requires_pattern():
+    with pytest.raises(ValueError):
+        pharm.Constraint(kind="smarts", point=(0, 0, 0))
+
+
+def test_smarts_constraint_rejects_invalid_pattern():
+    with pytest.raises(ValueError):
+        pharm.Constraint(kind="smarts", point=(0, 0, 0), smarts="not a smarts(")

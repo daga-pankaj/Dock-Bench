@@ -14,7 +14,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, docking, prep
+from rdkit import Chem
+
+from . import config, docking, prep, strain
 from . import pharmacophore as pharm
 
 
@@ -29,6 +31,10 @@ class LigandRun:
     status: str = "queued"  # queued | running | done | failed | cancelled
     best_score: float | None = None
     scores: list[float] = field(default_factory=list)
+    # Ligand-only MMFF strain per pose (see backend.strain), same order/index
+    # as `scores`. None entries mean strain couldn't be scored for that pose
+    # (e.g. an element MMFF has no parameters for) - never fails the job.
+    strain_energies: list[float | None] = field(default_factory=list)
     n_poses: int = 0
     error: str | None = None
     started: str | None = None
@@ -54,6 +60,11 @@ class JobParams:
     scoring: str = "vina"
     engine: str = "smina"
     use_gpu: bool = True
+    # Extra `--minimize` pass (see docking.minimize) run on every pose after
+    # its own docking search finishes - relaxes clashes a coarse
+    # exhaustiveness/energy_range left behind, using the same scoring
+    # function docking already used.
+    minimize_after_docking: bool = False
     # Raw dicts (kind/point/radius/required/weight/label), not Constraint
     # objects, so this dataclass stays plain-JSON-serialisable via asdict().
     constraints: list[dict] = field(default_factory=list)
@@ -111,6 +122,7 @@ class Job:
                 "scoring": self.params.scoring,
                 "engine": self.params.engine,
                 "use_gpu": self.params.use_gpu,
+                "minimize_after_docking": self.params.minimize_after_docking,
                 "constraints": self.params.constraints,
             },
             "n_ligands": len(self.ligands),
@@ -297,6 +309,28 @@ class JobManager:
                 cpu=cpu_per_ligand,
                 constraints=constraints,
             )
+            if job.params.minimize_after_docking:
+                poses_path = job.poses_path(run.name)
+                # smina reads --ligand while it's writing --out - a distinct
+                # temp path avoids reading and writing the same file at once,
+                # then the temp file replaces the original once minimize
+                # actually succeeds (a failed minimize leaves the un-
+                # minimized poses in place rather than a half-written file).
+                minimized_path = poses_path.with_name(poses_path.stem + ".minimized.sdf")
+                poses = docking.minimize(
+                    receptor=job.receptor_path,
+                    poses_sdf=poses_path,
+                    out_sdf=minimized_path,
+                    center=job.params.center,
+                    size=job.params.size,
+                    log_path=job.log_path(run.name),
+                    scoring=job.params.scoring,
+                    engine=job.params.engine,
+                    use_gpu=job.params.use_gpu,
+                    cpu=cpu_per_ligand,
+                    constraints=constraints,
+                )
+                minimized_path.replace(poses_path)
             # poses are already best-constrained-first when constraints were
             # given (see docking.parse_poses), so [0] is the one to report.
             scores = [p.affinity for p in poses if p.affinity is not None]
@@ -305,6 +339,16 @@ class JobManager:
             run.best_score = min(scores) if scores else None
             run.constraint_satisfied = poses[0].constraint_satisfied
             run.constraint_detail = poses[0].constraint_detail
+
+            try:  # strain is a nicety on top of the docking result, never worth failing the job over
+                pose_mols = [
+                    m for m in Chem.SDMolSupplier(str(job.poses_path(run.name)), removeHs=False, sanitize=False)
+                    if m is not None
+                ]
+                run.strain_energies = strain.strain_energies(pose_mols)
+            except Exception:
+                run.strain_energies = []
+
             self._finish(job, run, status="done")
         except Exception as exc:  # one bad ligand must not sink the batch
             self._finish(job, run, status="failed", error=str(exc)[:400])

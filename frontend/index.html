@@ -18,74 +18,94 @@
   <!-- left column: setup -->
   <section class="panel" id="setup">
     <div class="card">
-      <h2>1 · Receptor</h2>
-      <div class="row">
-        <input id="pdbId" placeholder="PDB ID (e.g. 1STP)" maxlength="4">
-        <button id="fetchBtn">Fetch</button>
+      <div class="row viewer-head">
+        <h2>1 · Receptor</h2>
+        <button id="toggleReceptorBtn" class="ghost mini" title="minimize this panel">_</button>
       </div>
-      <div class="row">
-        <label class="filebtn">Upload .pdb<input type="file" id="pdbFile" accept=".pdb,.ent,.txt"></label>
-        <span id="receptorInfo" class="muted">no receptor loaded</span>
-      </div>
-      <div class="row checks">
-        <label><input type="checkbox" id="removeLigand" checked> delete existing ligand(s) before docking</label>
-        <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
-        <label><input type="checkbox" id="trimChains"> drop extra monomers far from site</label>
-      </div>
-      <p class="muted small">Surface/waters/style etc. are all in the viewer's own
-        panel (right side) - this is the full Mol* app, not a stripped-down view.</p>
-    </div>
-
-    <div class="card">
-      <h2>2 · Active site</h2>
-      <p class="muted small">Click a bound ligand in the viewer to box it, or switch to
-        <b>pick atoms</b> and click residues to build a box from the picks.</p>
-      <div class="row">
-        <div class="seg">
-          <button class="segbtn active" data-mode="ligand">click ligand</button>
-          <button class="segbtn" data-mode="atoms">pick atoms</button>
+      <div id="receptorBody">
+        <div class="row">
+          <input id="pdbId" placeholder="PDB ID (e.g. 1STP)" maxlength="4">
+          <button id="fetchBtn">Fetch</button>
         </div>
-        <button id="clearPicks" class="ghost">clear picks</button>
-      </div>
-      <div id="hetList" class="hetlist"></div>
-      <p class="muted small">A co-crystallized peptide/peptidomimetic ligand is its own
-        chain, not a bound-ligand group above - tick it here to delete it from the
-        receptor before docking (its own pocket would otherwise stay occupied).</p>
-      <div id="chainList" class="chainlist"></div>
-      <div class="grid3">
-        <label>center x<input type="number" step="0.1" id="cx"></label>
-        <label>center y<input type="number" step="0.1" id="cy"></label>
-        <label>center z<input type="number" step="0.1" id="cz"></label>
-        <label>size x<input type="number" step="0.5" id="sx" value="22"></label>
-        <label>size y<input type="number" step="0.5" id="sy" value="22"></label>
-        <label>size z<input type="number" step="0.5" id="sz" value="22"></label>
-      </div>
-      <div class="row">
-        <label class="inline">padding <input type="number" id="padding" value="5" step="0.5" min="0" max="15"> Å</label>
-        <button id="cubeBtn" class="ghost">make cubic</button>
-        <span id="siteInfo" class="muted small"></span>
+        <div class="row">
+          <label class="filebtn">Upload .pdb<input type="file" id="pdbFile" accept=".pdb,.ent,.txt"></label>
+          <span id="receptorInfo" class="muted">no receptor loaded</span>
+        </div>
+        <div class="row checks">
+          <label><input type="checkbox" id="removeLigand" checked> delete existing ligand(s) before docking</label>
+          <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
+          <label><input type="checkbox" id="trimChains"> drop extra monomers far from site</label>
+        </div>
+        <p class="muted small">Surface/waters/style etc. are all in the viewer's own
+          panel (right side) - this is the full Mol* app, not a stripped-down view.</p>
       </div>
     </div>
 
     <div class="card">
-      <h2>3 · Ligands</h2>
-      <textarea id="smilesBox" rows="5" spellcheck="false"
-        placeholder="One SMILES per line, optional name after a space:&#10;CC(=O)Oc1ccccc1C(=O)O aspirin&#10;CN1C=NC2=C1C(=O)N(C)C(=O)N2C caffeine"></textarea>
-      <div class="row">
-        <button id="parseText" class="ghost">Load from box</button>
-        <label class="filebtn">Upload .smi/.sdf/.csv<input type="file" id="ligFile" accept=".smi,.smiles,.txt,.sdf,.sd,.mol,.csv,.tsv"></label>
-        <span id="ligInfo" class="muted"></span>
+      <div class="row viewer-head">
+        <h2>2 · Active site</h2>
+        <button id="toggleActiveSiteBtn" class="ghost mini" title="minimize this panel">_</button>
       </div>
-      <div id="ligPreview" class="ligpreview"></div>
+      <div id="activeSiteBody">
+        <p class="muted small">Click a bound ligand in the viewer to box it, or switch to
+          <b>pick atoms</b> and click residues to build a box from the picks.</p>
+        <div class="row">
+          <div class="seg">
+            <button class="segbtn active" data-mode="ligand">click ligand</button>
+            <button class="segbtn" data-mode="atoms">pick atoms</button>
+          </div>
+          <button id="clearPicks" class="ghost">clear picks</button>
+        </div>
+        <div id="hetList" class="hetlist"></div>
+        <p class="muted small">A co-crystallized peptide/peptidomimetic ligand is its own
+          chain, not a bound-ligand group above - tick it here to delete it from the
+          receptor before docking (its own pocket would otherwise stay occupied).</p>
+        <div id="chainList" class="chainlist"></div>
+        <div class="grid3">
+          <label>center x<input type="number" step="0.1" id="cx"></label>
+          <label>center y<input type="number" step="0.1" id="cy"></label>
+          <label>center z<input type="number" step="0.1" id="cz"></label>
+          <label>size x<input type="number" step="0.5" id="sx" value="22"></label>
+          <label>size y<input type="number" step="0.5" id="sy" value="22"></label>
+          <label>size z<input type="number" step="0.5" id="sz" value="22"></label>
+        </div>
+        <div class="row">
+          <label class="inline">padding <input type="number" id="padding" value="5" step="0.5" min="0" max="15"> Å</label>
+          <button id="cubeBtn" class="ghost">make cubic</button>
+          <span id="siteInfo" class="muted small"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card floating" id="pharmacophoreCard">
+      <div class="row viewer-head">
+        <h2>3 · Pharmacophore constraints <span class="muted small">(optional)</span></h2>
+        <button id="togglePharmacophoreBtn" class="ghost mini" title="minimize this panel">_</button>
+      </div>
+      <div id="pharmacophoreBody">
+        <p class="muted small">Checked against each pose after docking (smina/gnina have no way to bias
+          the search itself toward a point) - poses meeting every "required" constraint are ranked first.
+          Click "pick point", then click an atom in the viewer.</p>
+        <div id="constraintList" class="constraintlist"></div>
+        <button id="addConstraint" class="ghost">+ add constraint</button>
+      </div>
     </div>
 
     <div class="card">
-      <h2>4 · Pharmacophore constraints <span class="muted small">(optional)</span></h2>
-      <p class="muted small">Checked against each pose after docking (smina/gnina have no way to bias
-        the search itself toward a point) - poses meeting every "required" constraint are ranked first.
-        Click "pick point", then click an atom in the viewer.</p>
-      <div id="constraintList" class="constraintlist"></div>
-      <button id="addConstraint" class="ghost">+ add constraint</button>
+      <div class="row viewer-head">
+        <h2>4 · Ligands</h2>
+        <button id="toggleLigandsBtn" class="ghost mini" title="minimize this panel">_</button>
+      </div>
+      <div id="ligandsBody">
+        <textarea id="smilesBox" rows="5" spellcheck="false"
+          placeholder="One SMILES per line, optional name after a space:&#10;CC(=O)Oc1ccccc1C(=O)O aspirin&#10;CN1C=NC2=C1C(=O)N(C)C(=O)N2C caffeine"></textarea>
+        <div class="row">
+          <button id="parseText" class="ghost">Load from box</button>
+          <label class="filebtn">Upload .smi/.sdf/.csv<input type="file" id="ligFile" accept=".smi,.smiles,.txt,.sdf,.sd,.mol,.csv,.tsv"></label>
+          <span id="ligInfo" class="muted"></span>
+        </div>
+        <div id="ligPreview" class="ligpreview"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -107,6 +127,10 @@
         <label class="inline" title="raises exhaustiveness/energy range to search the larger, floppier conformer space peptides and peptidomimetics need">
           <input type="checkbox" id="peptideMode"> peptide / peptidomimetic ligands (bump exhaustiveness &amp; energy range)</label>
       </div>
+      <div class="row">
+        <label class="inline" title="extra smina/gnina --minimize pass on every pose after its own docking search finishes - relaxes clashes a coarse exhaustiveness/energy range left behind">
+          <input type="checkbox" id="minimizeAfterDocking"> minimize each pose after docking</label>
+      </div>
       <div class="row" id="gpuRow" style="display:none;">
         <label class="inline">device
           <select id="deviceSel">
@@ -117,7 +141,7 @@
         <span id="gpuInfo" class="muted small"></span>
       </div>
       <div class="row">
-        <button id="runBtn" class="primary">Run docking</button>
+        <button id="runBtn" class="primary">Run</button>
         <button id="cancelBtn" class="ghost" disabled>Cancel</button>
         <span id="runInfo" class="muted"></span>
       </div>
@@ -132,11 +156,23 @@
         <h2>Viewer</h2>
         <div class="row tight">
           <button id="hideLigandBtn" class="ghost" title="hide co-crystallized ligand from the complex">hide ligand</button>
+          <button id="hideProteinBtn" class="ghost" title="hide the receptor protein from the complex">hide protein</button>
           <button id="zoomSiteBtn" class="ghost" title="zoom to docking box">site</button>
         </div>
       </div>
       <div id="viewer"></div>
       <div id="poseBar" class="posebar hidden"></div>
+    </div>
+
+    <div class="card" id="interactionCard">
+      <div class="row viewer-head">
+        <h2>2D Interaction Diagram</h2>
+        <button id="toggleDiagramBtn" class="ghost mini" title="minimize this panel">_</button>
+      </div>
+      <div id="diagramBody">
+        <p id="diagramEmpty" class="muted small">select a pose to see its interaction diagram</p>
+        <img id="diagramImg" class="hidden" alt="2D protein-ligand interaction diagram">
+      </div>
     </div>
 
     <div class="card">

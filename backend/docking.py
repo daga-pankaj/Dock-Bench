@@ -44,6 +44,10 @@ class Pose:
     # left at these defaults and the pose order is untouched.
     constraint_satisfied: bool | None = None
     constraint_detail: list[dict] = field(default_factory=list)
+    # 0-based position this pose was read from in its source SDF, kept
+    # through any re-sort so minimize()'s reorder pass (see
+    # _rewrite_in_rank_order) can find its way back to the original block.
+    orig_index: int = -1
 
 
 def _find_engine(engine: str) -> str:
@@ -57,7 +61,9 @@ def _find_engine(engine: str) -> str:
 
 def engine_version(engine: str = "smina") -> str:
     exe = _find_engine(engine)
-    out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)
+    out = subprocess.run(
+        [exe, "--version"], capture_output=True, text=True, timeout=60, env=config.subprocess_env(exe)
+    )
     return (out.stdout or out.stderr).strip().splitlines()[0] if (out.stdout or out.stderr) else engine
 
 
@@ -112,6 +118,50 @@ def build_command(
     return cmd
 
 
+def build_minimize_command(
+    receptor: Path,
+    ligand: Path,
+    out_sdf: Path,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    scoring: str = "vina",
+    cpu: int = 1,
+    engine: str = "smina",
+    use_gpu: bool = True,
+) -> list[str]:
+    """`--minimize` mode: no search, just a local energy minimization of
+    whatever pose(s) are already in `ligand` against the receptor (each
+    conformer in a multi-pose SDF is relaxed independently, same order and
+    count out as in). Meant as a post-docking relax pass on top of the
+    minimization vina/smina already applies per pose during the search
+    itself, e.g. when a low exhaustiveness/energy_range left clashes behind.
+    """
+    if engine not in ENGINES:
+        raise ValueError(f"unknown docking engine: {engine}")
+    exe = _find_engine(engine)
+    if scoring not in SCORING_FUNCTIONS:
+        raise ValueError(f"unknown scoring function: {scoring}")
+    cmd = [
+        exe,
+        "--receptor", str(receptor),
+        "--ligand", str(ligand),
+        "--out", str(out_sdf),
+        "--center_x", f"{center[0]:.3f}",
+        "--center_y", f"{center[1]:.3f}",
+        "--center_z", f"{center[2]:.3f}",
+        "--size_x", f"{size[0]:.3f}",
+        "--size_y", f"{size[1]:.3f}",
+        "--size_z", f"{size[2]:.3f}",
+        "--scoring", scoring,
+        "--cpu", str(cpu),
+        "--minimize",
+        "--quiet",
+    ]
+    if engine == "gnina" and not use_gpu:
+        cmd.append("--no_gpu")
+    return cmd
+
+
 def parse_poses(sdf_path: Path, constraints: list[pharm.Constraint] | None = None) -> list[Pose]:
     """Read the scores smina writes as SDF properties on each pose.
 
@@ -143,6 +193,7 @@ def parse_poses(sdf_path: Path, constraints: list[pharm.Constraint] | None = Non
             affinity=prop("minimizedAffinity"),
             rmsd_lb=prop("minimizedRMSD"),
             rmsd_ub=prop("RMSD"),
+            orig_index=i - 1,
         )
         pen = 0.0
         if constraints:
@@ -175,6 +226,21 @@ def parse_poses(sdf_path: Path, constraints: list[pharm.Constraint] | None = Non
     return poses
 
 
+def _rewrite_in_rank_order(sdf_path: Path, poses: list[Pose]) -> None:
+    """Physically reorders the SDF on disk to match `poses`' current order.
+
+    Every other place a pose is looked up by position (the poses.sdf
+    download, the pose bar, interactions2d) is purely positional against
+    this file - a Pose list re-sorted only in memory (parse_poses' own
+    constraint-first sort, or minimize()'s affinity re-sort below) would
+    otherwise silently point "pose 1" at the wrong block.
+    """
+    blocks = sdf_path.read_text().split("$$$$\n")
+    if blocks and blocks[-1].strip() == "":
+        blocks = blocks[:-1]  # trailing empty chunk after the last delimiter
+    sdf_path.write_text("".join(blocks[p.orig_index] + "$$$$\n" for p in poses))
+
+
 def dock(
     receptor: Path,
     ligand_sdf: Path,
@@ -188,7 +254,7 @@ def dock(
     """Dock one ligand and return its poses, best first (or best-constrained-first, see parse_poses)."""
     cmd = build_command(receptor, ligand_sdf, out_sdf, center, size, **kwargs)
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=config.SMINA_TIMEOUT
+        cmd, capture_output=True, text=True, timeout=config.SMINA_TIMEOUT, env=config.subprocess_env(cmd[0])
     )
     if log_path is not None:
         log_path.write_text(
@@ -200,4 +266,46 @@ def dock(
     poses = parse_poses(out_sdf, constraints=constraints)
     if not poses:
         raise SminaFailed("smina produced no poses (ligand may not fit the box)")
+    return poses
+
+
+def minimize(
+    receptor: Path,
+    poses_sdf: Path,
+    out_sdf: Path,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    log_path: Path | None = None,
+    constraints: list[pharm.Constraint] | None = None,
+    **kwargs,
+) -> list[Pose]:
+    """Relax an already-docked poses.sdf in place (see build_minimize_command).
+
+    Each pose is minimized independently, so the affinity order coming out
+    isn't guaranteed to still be best-first the way dock()'s own output is -
+    re-sorted here by affinity (constraint-first-then-affinity when
+    `constraints` is given, same as parse_poses; plain affinity otherwise) so
+    pose 1 stays "the best pose" for callers same as after dock().
+    """
+    cmd = build_minimize_command(receptor, poses_sdf, out_sdf, center, size, **kwargs)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=config.SMINA_TIMEOUT, env=config.subprocess_env(cmd[0])
+    )
+    if log_path is not None:
+        # Appended, not overwritten - this normally runs right after dock()
+        # against the same log_path, and the docking search's own log is
+        # worth keeping alongside the minimize pass that followed it.
+        with log_path.open("a") as f:
+            f.write("\n\n--- minimize ---\n\n$ " + " ".join(cmd) + "\n\n" + (proc.stdout or "") + "\n" + (proc.stderr or ""))
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise SminaFailed(tail[-1] if tail else f"smina exited {proc.returncode}")
+    poses = parse_poses(out_sdf, constraints=constraints)
+    if not poses:
+        raise SminaFailed("smina produced no poses after minimization")
+    if not constraints:
+        poses.sort(key=lambda p: p.affinity if p.affinity is not None else 0.0)
+        for rank, pose in enumerate(poses, start=1):
+            pose.rank = rank
+    _rewrite_in_rank_order(out_sdf, poses)
     return poses

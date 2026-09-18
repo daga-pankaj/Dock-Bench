@@ -65,6 +65,20 @@ main {
 }
 .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; }
 
+/* Stays pinned under the header while the rest of the left column scrolls
+   past, so picking/adding constraints doesn't need a scroll-down-then-back
+   round trip. Capped and internally scrollable so a long constraint list
+   can't grow to cover the whole page. */
+.card.floating {
+  position: sticky;
+  top: 54px;
+  z-index: 5;
+  max-height: calc(100vh - 74px);
+  overflow-y: auto;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .35);
+}
+@media (max-width: 1050px) { .card.floating { position: static; max-height: none; overflow-y: visible; box-shadow: none; } }
+
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .row.tight { margin: 0; gap: 6px; }
 .row.checks label { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
@@ -94,6 +108,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.primary:hover { background: #6bb5ff; }
 button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
 .ghost { background: transparent; }
+.ghost.mini { padding: 2px 9px; line-height: 1; font-weight: 700; }
 .ghost.active { background: var(--accent); color: #05121f; border-color: var(--accent); font-weight: 600; }
 .filebtn input { display: none; }
 .btnlink { text-decoration: none; font-size: 13px; }
@@ -151,6 +166,8 @@ button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
 .pose { font-size: 12px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--card2); cursor: pointer; }
 .pose.active { background: var(--good); color: #04140d; border-color: var(--good); font-weight: 600; }
 
+#diagramImg { max-width: 100%; display: block; margin: 0 auto; border-radius: 8px; }
+
 .progress { height: 6px; background: #10151b; border-radius: 4px; overflow: hidden; margin-top: 6px; }
 #bar { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 
@@ -165,6 +182,11 @@ td.score { font-family: ui-monospace, Menlo, monospace; }
 .tag.running { color: var(--accent); border-color: #23425c; }
 .tag.queued { color: var(--muted); }
 .tag.failed, .tag.cancelled { color: var(--bad); border-color: #5c2626; }
+
+.posetoggle { padding: 0 5px; font-size: 11px; line-height: 1.4; margin-left: 2px; }
+tr.posedetail { background: #161b22; }
+tr.posedetail td { padding: 6px 8px 8px 24px; border-bottom: 1px solid #1c232c; }
+.posecell { display: inline-block; font-family: ui-monospace, Menlo, monospace; font-size: 12px; margin: 2px 14px 2px 0; }
 
 .hidden { display: none !important; }
 

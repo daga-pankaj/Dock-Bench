@@ -35,6 +35,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, docking, prep
+from . import interaction_render
+from . import interactions_prolif as iprolif
 from . import pharmacophore as pharm
 from .jobs import MANAGER, JobParams
 
@@ -94,10 +96,13 @@ class ParseRequest(BaseModel):
 
 
 class ConstraintIn(BaseModel):
-    """One pharmacophoric constraint: an H-bond donor/acceptor or any heavy
-    atom the ligand must place within `radius` of `point` (a receptor-atom or
-    hand-picked coordinate). Checked against each pose after docking, not
-    during smina/gnina's own search - see backend/pharmacophore.py."""
+    """One pharmacophoric constraint: an H-bond donor/acceptor, an aromatic
+    ring (pi-stacking proxy), a metal-coordinating atom, any heavy atom
+    ("positional"), or any atom matching a user SMARTS ("smarts", needs the
+    `smarts` field) - checked for proximity to `radius` of `point` (a
+    receptor-atom or hand-picked coordinate). Checked against each pose after
+    docking, not during smina/gnina's own search - see
+    backend/pharmacophore.py."""
 
     kind: str
     point: tuple[float, float, float]
@@ -105,6 +110,7 @@ class ConstraintIn(BaseModel):
     required: bool = True
     weight: float = Field(1.0, ge=0.0, le=20.0)
     label: str = ""
+    smarts: str | None = None  # only used (and required) when kind == "smarts"
 
 
 class JobRequest(BaseModel):
@@ -119,6 +125,7 @@ class JobRequest(BaseModel):
     scoring: str = "vina"
     engine: str = "smina"
     use_gpu: bool = True
+    minimize_after_docking: bool = False
     keep_waters: bool = False
     remove_ligand: bool = True
     exclude_chains: list[str] = Field(default_factory=list)
@@ -307,6 +314,10 @@ def create_job(req: JobRequest) -> dict:
     for c in req.constraints:
         if c.kind not in pharm.KINDS:
             raise HTTPException(400, f"unknown constraint kind {c.kind}")
+        try:
+            pharm.Constraint.from_dict(c.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     receptor_text = _receptor_path(req.receptor_id).read_text()
     cleaned = prep.clean_receptor(
@@ -334,6 +345,7 @@ def create_job(req: JobRequest) -> dict:
         scoring=req.scoring,
         engine=req.engine,
         use_gpu=req.use_gpu,
+        minimize_after_docking=req.minimize_after_docking,
         constraints=[c.model_dump() for c in req.constraints],
     )
     job = MANAGER.submit(cleaned, f"receptor_{req.receptor_id}", specs, params)
@@ -390,12 +402,45 @@ def ligand_log(job_id: str, name: str) -> Response:
     return PlainTextResponse(path.read_text())
 
 
+@app.get("/api/jobs/{job_id}/ligands/{name}/poses/{pose_index}/interactions2d.svg")
+def ligand_interactions_2d(job_id: str, name: str, pose_index: int) -> Response:
+    """A flattened 2D interaction diagram (ProLIF detection + our own LigPlot-
+    style render, see backend/interactions_prolif.py and backend/interaction_render.py)
+    for one specific already-docked pose. pose_index is 1-based, matching the
+    pose bar's labels and docking.Pose.rank."""
+    job = MANAGER.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    name = _safe_name(name)
+    poses_path = job.poses_path(name)
+    if not poses_path.exists():
+        raise HTTPException(404, "no poses for this ligand")
+    if pose_index < 1:
+        raise HTTPException(400, "pose_index is 1-based")
+
+    cache_path = job.dir / "interactions" / f"{name}_{pose_index}.svg"
+    if cache_path.exists():
+        return Response(cache_path.read_text(), media_type="image/svg+xml")
+
+    try:
+        mol, hits = iprolif.analyze_pose(job.receptor_path.read_text(), poses_path, pose_index)
+        svg = interaction_render.render_svg(mol, hits)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # ProLIF failure - a broken diagram isn't a server outage
+        svg = interaction_render.render_placeholder_svg(f"interaction detection failed: {exc}"[:200])
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(svg)
+    return Response(svg, media_type="image/svg+xml")
+
+
 def _results_csv(job) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
         ["name", "smiles", "status", "best_affinity_kcal_per_mol", "n_poses",
-         "all_scores", "constraints_satisfied", "error"]
+         "all_scores", "all_strain_energies_kcal_per_mol", "constraints_satisfied", "error"]
     )
     for lig in job.ligands:
         writer.writerow(
@@ -406,6 +451,7 @@ def _results_csv(job) -> str:
                 "" if lig.best_score is None else f"{lig.best_score:.2f}",
                 lig.n_poses,
                 ";".join(f"{s:.2f}" for s in lig.scores),
+                ";".join("" if e is None else f"{e:.2f}" for e in lig.strain_energies),
                 "" if lig.constraint_satisfied is None else str(lig.constraint_satisfied),
                 lig.error or "",
             ]

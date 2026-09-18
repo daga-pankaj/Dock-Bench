@@ -85,6 +85,29 @@ def find_gnina() -> str | None:
     return shutil.which("gnina")
 
 
+def subprocess_env(exe: str) -> dict[str, str]:
+    """Environment for running a bundled tool (smina/gnina) as a subprocess.
+
+    Extends the current environment; when `exe` resolved from TOOL_ENV (our
+    micromamba prefix, not a system install) this also points BABEL_LIBDIR at
+    the bundled OpenBabel's plugin dir. smina/gnina link against OpenBabel for
+    structure I/O (PDB/SDF/mol2/...) and it resolves its format plugins at
+    runtime via that variable - without it every read/write silently fails
+    ("could not open ... for reading") even though the file exists, since the
+    PDB/SDF format handlers themselves never registered.
+    """
+    env = dict(os.environ)
+    try:
+        Path(exe).resolve().relative_to(TOOL_ENV.resolve())
+    except ValueError:
+        return env  # not our bundled install - leave BABEL_LIBDIR (if any) alone
+    lib_root = TOOL_ENV / ("Library/lib/openbabel" if os.name == "nt" else "lib/openbabel")
+    versions = sorted(lib_root.glob("*")) if lib_root.is_dir() else []
+    if versions:
+        env["BABEL_LIBDIR"] = str(versions[-1])
+    return env
+
+
 def has_nvidia_gpu() -> bool:
     """Best-effort local hint for the UI; gnina itself decides at run time."""
     return shutil.which("nvidia-smi") is not None

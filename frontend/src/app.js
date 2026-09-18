@@ -73,9 +73,18 @@ const S = {
   job: null,
   poll: null,
   selectedLigand: null,
+  selectedLigandObj: null, // the ligand row object last passed to showPoses()
   poseReps: [],        // Mol* representation refs, one per pose currently shown
   activePose: 0,
   hideOrigLigand: false, // hide co-crystallized ligand from the complex
+  hideProtein: false,    // hide the receptor's polymer cartoon from the complex
+  diagramHidden: false,   // 2D interaction diagram panel toggled off
+  diagramUrl: null,        // current object URL behind #diagramImg, revoked on change
+  receptorPanelHidden: false,     // "1 · Receptor" card minimized
+  activeSitePanelHidden: false,   // "2 · Active site" card minimized
+  pharmacophorePanelHidden: false, // "3 · Pharmacophore constraints" card minimized
+  ligandsPanelHidden: false,       // "4 · Ligands" card minimized
+  expandedResultRows: new Set(),   // ligand names whose per-pose score/strain breakdown is open
 };
 
 let plugin = null;
@@ -163,6 +172,48 @@ async function initViewer() {
 // never atom-pickable in the first place.
 const SYNTHETIC_RESNAMES = new Set(["BOX", "PIK", "PHC"]);
 
+// Side-chain aromatic ring atom names per residue, keyed by residue name -
+// used to snap an "aromatic" constraint pick to the ring's centroid (the
+// real pi-stacking anchor) instead of whichever single ring atom got
+// clicked. TRP has two rings; whichever one contains the clicked atom wins.
+const AROMATIC_RINGS = {
+  PHE: [["CG", "CD1", "CD2", "CE1", "CE2", "CZ"]],
+  TYR: [["CG", "CD1", "CD2", "CE1", "CE2", "CZ"]],
+  HIS: [["CG", "ND1", "CD2", "CE1", "NE2"]],
+  TRP: [
+    ["CG", "CD1", "NE1", "CE2", "CD2"],
+    ["CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2"],
+  ],
+};
+
+// Given the clicked location, resolve the aromatic ring (if any) the clicked
+// atom belongs to and return its centroid - null if the residue/atom isn't
+// part of a recognized aromatic ring, or the ring came back incomplete.
+function ringCentroidAt(loc, resn, atomName) {
+  const rings = AROMATIC_RINGS[resn];
+  if (!rings) return null;
+  const ring = rings.find((names) => names.includes(atomName));
+  if (!ring) return null;
+  const chain = StructureProperties.chain.auth_asym_id(loc);
+  const resi = StructureProperties.residue.auth_seq_id(loc);
+  const probe = StructureElement.Location.create(loc.structure);
+  probe.unit = loc.unit;
+  const p = Vec3.zero();
+  const pts = [];
+  for (const el of loc.unit.elements) {
+    probe.element = el;
+    if (StructureProperties.chain.auth_asym_id(probe) !== chain) continue;
+    if (StructureProperties.residue.auth_seq_id(probe) !== resi) continue;
+    if (!ring.includes(StructureProperties.atom.label_atom_id(probe))) continue;
+    loc.unit.conformation.position(el, p);
+    pts.push([p[0], p[1], p[2]]);
+  }
+  if (pts.length < ring.length) return null; // incomplete ring - don't trust a partial centroid
+  const n = pts.length;
+  const sum = pts.reduce((a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]], [0, 0, 0]);
+  return [sum[0] / n, sum[1] / n, sum[2] / n];
+}
+
 function onPluginClick(event) {
   try {
     const loci = event.current.loci;
@@ -177,13 +228,15 @@ function onPluginClick(event) {
     const p = Vec3.zero();
     loc.unit.conformation.position(loc.element, p);
 
+    const atomName = StructureProperties.atom.label_atom_id(loc);
     onAtomClick({
       resn,
       hetflag: StructureProperties.residue.group_PDB(loc) === "HETATM",
       chain: StructureProperties.chain.auth_asym_id(loc),
       resi: StructureProperties.residue.auth_seq_id(loc),
       x: p[0], y: p[1], z: p[2],
-      atom: StructureProperties.atom.label_atom_id(loc),
+      atom: atomName,
+      ring: ringCentroidAt(loc, resn, atomName), // [x,y,z] centroid, or null - see AROMATIC_RINGS
     });
   } catch (err) {
     console.warn("click handling failed", err);
@@ -240,11 +293,16 @@ async function styleReceptor() {
   const hideIfOrig = (rep) => {
     if (rep && hideOrig) plugin.state.data.updateCellState(rep.ref, { isHidden: true });
   };
+  const hideIfProtein = (rep) => {
+    if (rep && S.hideProtein) plugin.state.data.updateCellState(rep.ref, { isHidden: true });
+  };
 
   const polymerComp = await plugin.builders.structure.tryCreateComponentFromExpression(
     receptorStructure, Queries.polymer.expression, "polymer");
   track(polymerComp);
-  track(await addRep(polymerComp, "cartoon", "chain-id", undefined, { opacity: 0.92 }));
+  const polymerRep = await addRep(polymerComp, "cartoon", "chain-id", undefined, { opacity: 0.92 });
+  track(polymerRep);
+  hideIfProtein(polymerRep);
 
   // bound ligands / cofactors — always sticks so they stay clickable (unless
   // the "hide existing ligand" checkbox is on, e.g. to declutter a pocket
@@ -424,10 +482,21 @@ function onAtomClick(atom) {
     const c = S.constraints.find((c) => c.id === S.pendingPickId);
     S.pendingPickId = null;
     if (c) {
-      c.x = atom.x; c.y = atom.y; c.z = atom.z;
+      // "aromatic" anchors to the whole ring's centroid, not one ring atom -
+      // that's the real pi-stacking feature. Falls back to the clicked atom
+      // itself if it isn't part of a recognized aromatic ring.
+      const useRing = c.kind === "aromatic" && atom.ring;
+      const [x, y, z] = useRing ? atom.ring : [atom.x, atom.y, atom.z];
+      c.x = x; c.y = y; c.z = z;
       renderConstraints();
       rebuildConstraintMarkers();
-      toast(`constraint point set from ${atom.resn}${atom.resi} ${atom.atom}`);
+      if (c.kind === "aromatic" && !atom.ring) {
+        toast(`${atom.resn}${atom.resi} isn't a recognized aromatic ring atom - using the clicked atom itself`, true);
+      } else {
+        toast(useRing
+          ? `constraint point set to ring centroid of ${atom.resn}${atom.resi}`
+          : `constraint point set from ${atom.resn}${atom.resi} ${atom.atom}`);
+      }
     }
     return;
   }
@@ -566,6 +635,20 @@ const CONSTRAINT_KIND_LABELS = {
   hbond_donor: "H-bond donor",
   hbond_acceptor: "H-bond acceptor",
   positional: "positional (any atom)",
+  aromatic: "aromatic ring (pi-stacking)",
+  metal_coordination: "metal coordination",
+  smarts: "SMARTS match",
+};
+
+// Typical contact distance per kind, shown as a hint next to the radius
+// field - not enforced, just a starting point for the ones that aren't 3.5A.
+const CONSTRAINT_RADIUS_HINT = {
+  hbond_donor: "typical 2.5-3.5 Å",
+  hbond_acceptor: "typical 2.5-3.5 Å",
+  positional: "",
+  aromatic: "ring-centroid distance; typical 4-5.5 Å",
+  metal_coordination: "metal-ligand bond; typical 2.0-2.6 Å",
+  smarts: "",
 };
 
 function addConstraintRow() {
@@ -576,6 +659,7 @@ function addConstraintRow() {
     radius: 3.5,
     required: true,
     label: "",
+    smarts: "",
   });
   renderConstraints();
 }
@@ -597,24 +681,29 @@ function renderConstraints() {
       .map(([v, label]) => `<option value="${v}" ${v === c.kind ? "selected" : ""}>${label}</option>`)
       .join("");
     const pt = (v) => (Number.isFinite(v) ? v.toFixed(2) : "");
+    const smartsRow = c.kind === "smarts"
+      ? `<input class="c-smarts" type="text" placeholder="SMARTS pattern, e.g. [OX1]=[C,S]" value="${c.smarts || ""}">`
+      : "";
     row.innerHTML = `
-      <select class="c-kind">${kindOpts}</select>
+      <select class="c-kind" title="${CONSTRAINT_RADIUS_HINT[c.kind] || ""}">${kindOpts}</select>
       <button class="ghost c-pick" type="button">pick point</button>
       <input class="c-x" type="number" step="0.1" placeholder="x" value="${pt(c.x)}">
       <input class="c-y" type="number" step="0.1" placeholder="y" value="${pt(c.y)}">
       <input class="c-z" type="number" step="0.1" placeholder="z" value="${pt(c.z)}">
-      <label class="inline">radius <input class="c-radius" type="number" step="0.1" min="0.5" max="15" value="${c.radius}"> Å</label>
+      <label class="inline" title="${CONSTRAINT_RADIUS_HINT[c.kind] || ""}">radius <input class="c-radius" type="number" step="0.1" min="0.5" max="15" value="${c.radius}"> Å</label>
       <label class="inline"><input class="c-required" type="checkbox" ${c.required ? "checked" : ""}> required</label>
       <input class="c-label" type="text" placeholder="label (optional)" value="${c.label}">
+      ${smartsRow}
       <button class="ghost c-remove" type="button" title="remove">✕</button>`;
 
-    row.querySelector(".c-kind").onchange = (e) => { c.kind = e.target.value; };
+    row.querySelector(".c-kind").onchange = (e) => { c.kind = e.target.value; renderConstraints(); };
     row.querySelector(".c-x").oninput = (e) => { c.x = parseFloat(e.target.value); rebuildConstraintMarkers(); };
     row.querySelector(".c-y").oninput = (e) => { c.y = parseFloat(e.target.value); rebuildConstraintMarkers(); };
     row.querySelector(".c-z").oninput = (e) => { c.z = parseFloat(e.target.value); rebuildConstraintMarkers(); };
     row.querySelector(".c-radius").oninput = (e) => { c.radius = parseFloat(e.target.value); };
     row.querySelector(".c-required").onchange = (e) => { c.required = e.target.checked; };
     row.querySelector(".c-label").oninput = (e) => { c.label = e.target.value; };
+    row.querySelector(".c-smarts")?.addEventListener("input", (e) => { c.smarts = e.target.value; });
     row.querySelector(".c-pick").classList.toggle("armed", S.pendingPickId === c.id);
     row.querySelector(".c-pick").onclick = () => {
       S.pendingPickId = S.pendingPickId === c.id ? null : c.id;
@@ -636,12 +725,18 @@ function buildConstraintsPayload() {
     toast("a pharmacophore constraint is missing its point - pick one or remove the row", true);
     return null;
   }
+  const badSmarts = S.constraints.some((c) => c.kind === "smarts" && !c.smarts?.trim());
+  if (badSmarts) {
+    toast("a SMARTS constraint is missing its pattern", true);
+    return null;
+  }
   return S.constraints.map((c) => ({
     kind: c.kind,
     point: [c.x, c.y, c.z],
     radius: c.radius,
     required: c.required,
     label: c.label,
+    smarts: c.kind === "smarts" ? c.smarts.trim() : undefined,
   }));
 }
 
@@ -669,6 +764,7 @@ async function runDocking() {
     scoring: $("scoring").value,
     engine: $("engineSel").value,
     use_gpu: $("deviceSel").value !== "cpu",
+    minimize_after_docking: $("minimizeAfterDocking").checked,
     keep_waters: $("keepWaters").checked,
     remove_ligand: $("removeLigand").checked,
     exclude_chains: [...S.excludeChains],
@@ -752,14 +848,25 @@ function renderJob(job) {
     const tr = document.createElement("tr");
     if (lig.name === S.selectedLigand) tr.className = "sel";
     const score = lig.best_score === null ? "-" : lig.best_score.toFixed(2);
+    const hasBreakdown = lig.scores && lig.scores.length > 1;
+    const expanded = S.expandedResultRows.has(lig.name);
     tr.innerHTML = `
       <td title="${lig.smiles || ""}">${lig.name}</td>
       <td><span class="tag ${lig.status}">${lig.status}</span></td>
-      <td class="score">${score}</td>
+      <td class="score">${score}${hasBreakdown ? ` <button class="ghost mini posetoggle" title="show every pose's score/strain">${expanded ? "▴" : "▾"}</button>` : ""}</td>
       <td>${lig.n_poses || ""}</td>
       <td>${constraintBadge(lig)}</td>
       <td></td>`;
     if (lig.error) tr.querySelector("td:nth-child(2)").title = lig.error;
+
+    if (hasBreakdown) {
+      tr.querySelector(".posetoggle").onclick = (e) => {
+        e.stopPropagation();
+        if (S.expandedResultRows.has(lig.name)) S.expandedResultRows.delete(lig.name);
+        else S.expandedResultRows.add(lig.name);
+        renderJob(job);
+      };
+    }
 
     const actions = tr.lastElementChild;
     if (lig.status === "done") {
@@ -776,6 +883,18 @@ function renderJob(job) {
       tr.onclick = (e) => { if (e.target.tagName !== "A" && e.target.tagName !== "BUTTON") showPoses(lig); };
     }
     tbody.appendChild(tr);
+
+    if (hasBreakdown && expanded) {
+      const detailTr = document.createElement("tr");
+      detailTr.className = "posedetail";
+      const cells = lig.scores.map((s, i) => {
+        const strain = lig.strain_energies && lig.strain_energies[i];
+        const strainText = strain === null || strain === undefined ? "" : ` <span class="muted">strain ${strain.toFixed(1)}</span>`;
+        return `<span class="posecell">#${i + 1} ${s.toFixed(2)} kcal/mol${strainText}</span>`;
+      }).join("");
+      detailTr.innerHTML = `<td colspan="6">${cells}</td>`;
+      tbody.appendChild(detailTr);
+    }
   });
 }
 
@@ -791,6 +910,10 @@ async function clearPoses() {
   poseStructures = [];
   S.poseReps = [];
   $("poseBar").classList.add("hidden");
+  if (S.diagramUrl) { URL.revokeObjectURL(S.diagramUrl); S.diagramUrl = null; }
+  $("diagramImg").classList.add("hidden");
+  $("diagramEmpty").textContent = "select a pose to see its interaction diagram";
+  $("diagramEmpty").classList.remove("hidden");
 }
 
 async function showPoses(lig) {
@@ -799,6 +922,7 @@ async function showPoses(lig) {
     const sdf = await api(`/api/jobs/${S.job.id}/ligands/${encodeURIComponent(lig.name)}/poses.sdf`);
     await clearPoses();
     S.selectedLigand = lig.name;
+    S.selectedLigandObj = lig;
 
     const blocks = sdf.split("$$$$").map((b) => b.trim()).filter((b) => b.length > 10);
     for (const block of blocks) {
@@ -849,6 +973,45 @@ function selectPose(idx) {
   });
   // "all" (idx -1) has no single pose to show contacts for; a specific pose does.
   showInteractions(idx).catch((err) => console.warn("interactions failed", err));
+  showInteractionDiagram(idx).catch((err) => console.warn("2d diagram failed", err));
+}
+
+// Fetches the backend's ProLIF-detected, LigPlot-style 2D diagram for one pose
+// and swaps it into #diagramImg. Rendered via a blob URL on an <img>, not
+// innerHTML'd as inline SVG - the backend escapes PDB-derived text before it
+// reaches the SVG, but an <img>-rendered SVG can't execute embedded scripts
+// even if that escaping ever had a gap, which innerHTML wouldn't guarantee.
+async function showInteractionDiagram(idx) {
+  const img = $("diagramImg"), empty = $("diagramEmpty");
+  if (S.diagramUrl) { URL.revokeObjectURL(S.diagramUrl); S.diagramUrl = null; }
+  if (idx < 0 || S.diagramHidden || !S.job || !S.selectedLigandObj) {
+    img.classList.add("hidden");
+    empty.textContent = "select a pose to see its interaction diagram";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.textContent = "loading diagram…";
+  empty.classList.remove("hidden");
+  img.classList.add("hidden");
+  try {
+    const name = encodeURIComponent(S.selectedLigandObj.name);
+    const res = await fetch(`/api/jobs/${S.job.id}/ligands/${name}/poses/${idx + 1}/interactions2d.svg`);
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const svgText = await res.text();
+    const blob = new Blob([svgText], { type: "image/svg+xml" });
+    S.diagramUrl = URL.createObjectURL(blob);
+    img.src = S.diagramUrl;
+    img.classList.remove("hidden");
+    empty.classList.add("hidden");
+  } catch (err) {
+    empty.textContent = "diagram unavailable";
+    empty.classList.remove("hidden");
+    toast(`interaction diagram: ${err.message}`, true);
+  }
 }
 
 // Non-covalent contacts (H-bonds, hydrophobic, ionic, ...) between the given
@@ -968,6 +1131,28 @@ function wire() {
     $("hideLigandBtn").classList.toggle("active", S.hideOrigLigand);
     styleReceptor();
   };
+  $("hideProteinBtn").onclick = () => {
+    S.hideProtein = !S.hideProtein;
+    $("hideProteinBtn").classList.toggle("active", S.hideProtein);
+    styleReceptor();
+  };
+  $("toggleDiagramBtn").onclick = () => {
+    S.diagramHidden = !S.diagramHidden;
+    $("toggleDiagramBtn").textContent = S.diagramHidden ? "+" : "_";
+    $("diagramBody").classList.toggle("hidden", S.diagramHidden);
+    if (!S.diagramHidden) showInteractionDiagram(S.activePose).catch((err) => console.warn("2d diagram failed", err));
+  };
+  const panelToggle = (btnId, bodyId, stateKey) => {
+    $(btnId).onclick = () => {
+      S[stateKey] = !S[stateKey];
+      $(btnId).textContent = S[stateKey] ? "+" : "_";
+      $(bodyId).classList.toggle("hidden", S[stateKey]);
+    };
+  };
+  panelToggle("toggleReceptorBtn", "receptorBody", "receptorPanelHidden");
+  panelToggle("toggleActiveSiteBtn", "activeSiteBody", "activeSitePanelHidden");
+  panelToggle("togglePharmacophoreBtn", "pharmacophoreBody", "pharmacophorePanelHidden");
+  panelToggle("toggleLigandsBtn", "ligandsBody", "ligandsPanelHidden");
   $("cubeBtn").onclick = () => {
     const s = boxSize().filter(Number.isFinite);
     if (!s.length) return;
