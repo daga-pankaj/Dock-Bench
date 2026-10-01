@@ -11,8 +11,9 @@ bundled locally at setup time (see "Frontend viewer build" below).
 ## Features
 
 - Fetch a receptor by PDB ID (RCSB) or upload a `.pdb` file
-- Auto-detect bound HETATM ligands/cofactors to seed the docking box, or
-  click atoms in the 3D viewer to build a box manually
+- Auto-detect binding sites using [fpocket](https://github.com/Discngine/fpocket)
+  (geometric pocket finder), bound HETATM ligands/cofactors, or click atoms
+  in the 3D viewer to build a box manually
 - Load ligands from pasted SMILES, or upload `.smi`/`.sdf`/`.mol`/`.csv`/`.tsv`
 - Dock many ligands concurrently (one docking process per ligand, thread pool)
 - Pick smina or gnina as the engine per job; gnina can use a CUDA GPU when
@@ -22,6 +23,10 @@ bundled locally at setup time (see "Frontend viewer build" below).
   poses toward the ones that satisfy them — smina/gnina have no way to bias
   their own search this way, so this is post-hoc filtering/reranking, not a
   constrained search (see `backend/pharmacophore.py`)
+- Self-docking validation: redock a receptor's own bound ligand and get
+  each pose's RMSD to its real crystallographic position, read straight off
+  the PDB's HETATM records and computed with `obrms` (bundled alongside
+  smina/gnina — see `backend/rmsd.py`)
 - Live job progress, per-ligand poses viewable in-browser, CSV/ZIP export
 - Job history survives a server restart (state reloaded from `runs/jobs/`)
 
@@ -32,8 +37,8 @@ Python 3 — it's used once, at setup time, to bundle the Mol* viewer.
 
 macOS / Linux:
 ```bash
-./setup.sh   # installs smina (+ gnina on Linux) via micromamba into
-             # .env-tools/, a Python venv into .venv/ with fastapi,
+./setup.sh   # installs smina, fpocket (+ gnina on Linux) via micromamba
+             # into .env-tools/, a Python venv into .venv/ with fastapi,
              # rdkit, etc., and builds frontend/app.js (see below).
 ```
 
@@ -118,11 +123,12 @@ npm run watch    # rebuild on every save while developing
 
 ```
 backend/
-  main.py     FastAPI app: receptor/ligand/job HTTP routes
-  jobs.py     Job store: one job -> many ligands, each docked in a thread
-  docking.py  Thin wrapper around the smina/gnina CLI
-  prep.py     Receptor cleanup, HET-ligand grouping, ligand parsing/3D embed
-  config.py   Paths and runtime settings (env-var overridable)
+  main.py           FastAPI app: receptor/ligand/job HTTP routes
+  jobs.py           Job store: one job -> many ligands, each docked in a thread
+  docking.py        Thin wrapper around the smina/gnina CLI
+  prep.py           Receptor cleanup, HET-ligand grouping, ligand parsing/3D embed
+  binding_sites.py  fpocket wrapper for automated binding site detection
+  config.py         Paths and runtime settings (env-var overridable)
 frontend/
   index.html, style.css     Static single-page UI shell
   src/app.js                Real source (imports Mol* directly) - edit this
@@ -145,6 +151,7 @@ runs/         receptor uploads + job outputs (gitignored; created at runtime)
 | `SMINA_TIMEOUT`      | `1800` (seconds)          | per-ligand docking hard timeout       |
 | `SMINA_BIN`          | (unset)                   | explicit path to a smina executable   |
 | `GNINA_BIN`          | (unset)                   | explicit path to a gnina executable   |
+| `OBRMS_BIN`          | (unset)                   | explicit path to an obrms executable (self-docking RMSD) |
 | `DOCKING_MAX_LIGANDS`| `50`                      | max ligands accepted per job          |
 | `DOCKING_REQUIRE_AUTH`| (unset)                  | set to anything to turn on HTTP Basic auth with an auto-generated password (printed to console on start) |
 | `DOCKING_AUTH_USER`  | `colleague`               | Basic auth username                   |

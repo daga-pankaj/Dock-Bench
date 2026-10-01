@@ -16,7 +16,7 @@ from pathlib import Path
 
 from rdkit import Chem
 
-from . import config, docking, prep, strain
+from . import config, docking, prep, rmsd, strain
 from . import pharmacophore as pharm
 
 
@@ -35,6 +35,12 @@ class LigandRun:
     # as `scores`. None entries mean strain couldn't be scored for that pose
     # (e.g. an element MMFF has no parameters for) - never fails the job.
     strain_energies: list[float | None] = field(default_factory=list)
+    # RMSD (Å) of each pose to the receptor's own bound-ligand reference (see
+    # backend.rmsd), same order/index as scores. Empty unless the job was
+    # submitted with a reference_ligand_key; None entries are poses obrms
+    # couldn't match to the reference's heavy-atom graph at all (usually
+    # because this ligand isn't the one that was bound).
+    rmsd_to_reference: list[float | None] = field(default_factory=list)
     n_poses: int = 0
     error: str | None = None
     started: str | None = None
@@ -68,6 +74,14 @@ class JobParams:
     # Raw dicts (kind/point/radius/required/weight/label), not Constraint
     # objects, so this dataclass stays plain-JSON-serialisable via asdict().
     constraints: list[dict] = field(default_factory=list)
+    # Raw HETATM lines for the receptor's own bound ligand, pulled from the
+    # original (uncleaned) receptor - see backend.rmsd/prep.het_ligand_pdb_block.
+    # None unless this job is a self-docking RMSD validation run.
+    reference_ligand_pdb: str | None = None
+    # MOE-specific parameters
+    moe_placement: str = "Triangle Matcher"
+    moe_refinement: str = "Rigid Receptor"
+    ph4_id: str | None = None  # MOE pharmacophore file ID
 
 
 class Job:
@@ -124,6 +138,10 @@ class Job:
                 "use_gpu": self.params.use_gpu,
                 "minimize_after_docking": self.params.minimize_after_docking,
                 "constraints": self.params.constraints,
+                "reference_ligand_pdb": self.params.reference_ligand_pdb,
+                "moe_placement": self.params.moe_placement,
+                "moe_refinement": self.params.moe_refinement,
+                "ph4_id": self.params.ph4_id,
             },
             "n_ligands": len(self.ligands),
             "n_finished": done,
@@ -161,6 +179,10 @@ class Job:
             engine=data["params"].get("engine", "smina"),
             use_gpu=data["params"].get("use_gpu", True),
             constraints=data["params"].get("constraints", []),
+            reference_ligand_pdb=data["params"].get("reference_ligand_pdb"),
+            moe_placement=data["params"].get("moe_placement", "Triangle Matcher"),
+            moe_refinement=data["params"].get("moe_refinement", "Rigid Receptor"),
+            ph4_id=data["params"].get("ph4_id"),
         )
         ligands = []
         for lig in data["ligands"]:
@@ -181,6 +203,7 @@ class Job:
                     finished=lig["finished"],
                     constraint_satisfied=lig.get("constraint_satisfied"),
                     constraint_detail=lig.get("constraint_detail", []),
+                    rmsd_to_reference=lig.get("rmsd_to_reference", []),
                 )
             )
         job = cls(data["id"], params, ligands, data["receptor"], created=data["created"])
@@ -246,7 +269,8 @@ class JobManager:
         specs: list[prep.LigandSpec],
         params: JobParams,
     ) -> Job:
-        job_id = uuid.uuid4().hex[:12]
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        job_id = f"{params.engine}_{timestamp}"
         ligands = [LigandRun(name=s.name, smiles=s.smiles) for s in specs]
         job = Job(job_id, params, ligands, receptor_name)
 
@@ -290,26 +314,44 @@ class JobManager:
             n_concurrent = max(1, min(len(job.ligands), config.MAX_WORKERS))
             cpu_per_ligand = max(1, config.MAX_WORKERS // n_concurrent)
 
-            constraints = [pharm.Constraint.from_dict(c) for c in job.params.constraints] or None
+            constraint_list = [pharm.Constraint.from_dict(c) for c in job.params.constraints]
+            constraints = constraint_list or None
 
-            poses = docking.dock(
-                receptor=job.receptor_path,
-                ligand_sdf=lig_path,
-                out_sdf=job.poses_path(run.name),
-                center=job.params.center,
-                size=job.params.size,
-                log_path=job.log_path(run.name),
-                exhaustiveness=job.params.exhaustiveness,
-                num_modes=job.params.num_modes,
-                energy_range=job.params.energy_range,
-                seed=job.params.seed,
-                scoring=job.params.scoring,
-                engine=job.params.engine,
-                use_gpu=job.params.use_gpu,
-                cpu=cpu_per_ligand,
-                constraints=constraints,
-            )
-            if job.params.minimize_after_docking:
+            # Build dock params - MOE uses different params than smina/gnina
+            dock_params = {
+                "receptor": job.receptor_path,
+                "ligand_sdf": lig_path,
+                "out_sdf": job.poses_path(run.name),
+                "center": job.params.center,
+                "size": job.params.size,
+                "log_path": job.log_path(run.name),
+                "num_modes": job.params.num_modes,
+                "scoring": job.params.scoring,
+                "engine": job.params.engine,
+                "constraints": constraints,
+            }
+
+            if job.params.engine == "moe":
+                ph4_file = None
+                if job.params.ph4_id:
+                    ph4_file = config.RUNS_DIR / "pharmacophores" / f"{job.params.ph4_id}.ph4"
+                dock_params.update({
+                    "placement": job.params.moe_placement,
+                    "refinement": job.params.moe_refinement,
+                    "ph4_file": ph4_file,
+                })
+            else:
+                dock_params.update({
+                    "exhaustiveness": job.params.exhaustiveness,
+                    "energy_range": job.params.energy_range,
+                    "seed": job.params.seed,
+                    "use_gpu": job.params.use_gpu,
+                    "cpu": cpu_per_ligand,
+                })
+
+            poses = docking.dock(**dock_params)
+            # MOE doesn't support separate minimize step via smina/gnina
+            if job.params.minimize_after_docking and job.params.engine != "moe":
                 poses_path = job.poses_path(run.name)
                 # smina reads --ligand while it's writing --out - a distinct
                 # temp path avoids reading and writing the same file at once,
@@ -340,14 +382,26 @@ class JobManager:
             run.constraint_satisfied = poses[0].constraint_satisfied
             run.constraint_detail = poses[0].constraint_detail
 
-            try:  # strain is a nicety on top of the docking result, never worth failing the job over
+            try:
                 pose_mols = [
                     m for m in Chem.SDMolSupplier(str(job.poses_path(run.name)), removeHs=False, sanitize=False)
                     if m is not None
                 ]
-                run.strain_energies = strain.strain_energies(pose_mols)
+            except Exception:
+                pose_mols = []
+
+            try:  # strain is a nicety on top of the docking result, never worth failing the job over
+                run.strain_energies = strain.strain_energies(pose_mols) if pose_mols else []
             except Exception:
                 run.strain_energies = []
+
+            try:  # RMSD to the receptor's own bound-ligand pose, see backend.rmsd
+                if job.params.reference_ligand_pdb and poses:
+                    run.rmsd_to_reference = rmsd.rmsds_to_reference(
+                        job.params.reference_ligand_pdb, job.poses_path(run.name), len(poses)
+                    )
+            except Exception:
+                run.rmsd_to_reference = []
 
             self._finish(job, run, status="done")
         except Exception as exc:  # one bad ligand must not sink the batch

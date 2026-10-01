@@ -38,6 +38,33 @@ def test_list_het_ligands_keeps_ions_even_below_min_atoms():
     assert "NA:A:300" in keys
 
 
+def test_het_ligand_pdb_block_returns_only_that_groups_hetatm_lines():
+    block = prep.het_ligand_pdb_block(RECEPTOR_PDB, "LIG:A:200")
+    lines = [ln for ln in block.splitlines() if ln.startswith("HETATM")]
+    assert len(lines) == 4
+    assert all(prep._resname(ln) == "LIG" for ln in lines)
+
+
+def test_het_ligand_pdb_block_missing_key_returns_none():
+    assert prep.het_ligand_pdb_block(RECEPTOR_PDB, "XXX:A:1") is None
+
+
+def test_het_ligand_pdb_block_drops_non_a_altlocs():
+    # A ligand modelled with alternate conformers: 4 atoms at altLoc A, 4 more
+    # duplicate atoms at altLoc B. Only the A copy should come back, or the
+    # atom count would double and never match a docked pose's composition.
+    receptor = """\
+HETATM    1  C1 ALIG A 200       9.000   9.000   9.000                       C
+HETATM    2  C2 ALIG A 200      11.000  11.000  11.000                       C
+HETATM    3  C1 BLIG A 200       9.100   9.100   9.100                       C
+HETATM    4  C2 BLIG A 200      11.100  11.100  11.100                       C
+END
+"""
+    block = prep.het_ligand_pdb_block(receptor, "LIG:A:200")
+    lines = [ln for ln in block.splitlines() if ln.startswith("HETATM")]
+    assert len(lines) == 2
+
+
 def test_clean_receptor_drops_waters_by_default():
     cleaned = prep.clean_receptor(RECEPTOR_PDB)
     assert "HOH" not in cleaned

@@ -9,6 +9,7 @@ import base64
 import csv
 import hmac
 import io
+import json
 import os
 import re
 import urllib.error
@@ -48,6 +49,7 @@ if config.AUTH_GENERATED:
 app = FastAPI(title="Docking Bench", version="1.0")
 
 PDB_ID_RE = re.compile(r"^[0-9A-Za-z]{4}$")
+COMP_ID_RE = re.compile(r"^[0-9A-Za-z]{1,5}$")
 MAX_BOX = 60.0
 
 
@@ -132,6 +134,16 @@ class JobRequest(BaseModel):
     trim_distant_chains: bool = False
     chain_cutoff: float = Field(15.0, ge=5.0, le=60.0)
     constraints: list[ConstraintIn] = Field(default_factory=list)
+    # Self-docking validation: the key (from het_ligands, resname:chain:resseq)
+    # of a bound ligand to compare each docked pose against by RMSD (see
+    # backend/rmsd.py). Read from this job's receptor before it's cleaned, so
+    # it still works with remove_ligand=True stripping that same ligand out
+    # of the receptor actually used for docking.
+    reference_ligand_key: str | None = None
+    # MOE-specific parameters
+    moe_placement: str = "Triangle Matcher"
+    moe_refinement: str = "Rigid Receptor"
+    ph4_id: str | None = None  # MOE pharmacophore file ID from /api/pharmacophore/upload
 
 
 # ---------------------------------------------------------------------------
@@ -187,16 +199,21 @@ def status() -> dict:
 
     smina_exe = config.find_smina()
     gnina_exe = config.find_gnina()
+    moebatch_exe = config.find_moebatch()
     return {
         "smina": smina_exe,
         "smina_version": version_of("smina", smina_exe),
         "gnina": gnina_exe,
         "gnina_version": version_of("gnina", gnina_exe),
+        "moebatch": moebatch_exe,
+        "moe_available": moebatch_exe is not None,
         "gpu_available": config.has_nvidia_gpu(),
         "workers": config.MAX_WORKERS,
         "scoring_functions": list(docking.SCORING_FUNCTIONS),
+        "moe_scoring_functions": list(docking.MOE_SCORING_FUNCTIONS),
         "default_num_modes": config.DEFAULT_NUM_MODES,
         "constraint_kinds": list(pharm.KINDS),
+        "engines": list(docking.ENGINES),
     }
 
 
@@ -219,6 +236,32 @@ async def upload_receptor(file: UploadFile = File(...)) -> dict:
     return _store_receptor(file.filename or "receptor.pdb", text)
 
 
+@app.post("/api/pharmacophore/upload")
+async def upload_pharmacophore(file: UploadFile = File(...)) -> dict:
+    """Upload a MOE .ph4 pharmacophore file for docking constraints."""
+    raw = await file.read()
+    if len(raw) > 1_000_000:
+        raise HTTPException(413, "file too large")
+    try:
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        raise HTTPException(400, "cannot decode file as text")
+
+    # Basic validation: check for MOE .ph4 header
+    if "#moe:ph4que" not in text and "#pharmacophore" not in text:
+        raise HTTPException(400, "not a valid MOE .ph4 file")
+
+    # Store in runs/pharmacophores/
+    import uuid
+    ph4_id = uuid.uuid4().hex[:12]
+    ph4_dir = config.JOB_DIR.parent / "pharmacophores"
+    ph4_dir.mkdir(exist_ok=True)
+    ph4_path = ph4_dir / f"{ph4_id}.ph4"
+    ph4_path.write_text(text)
+
+    return {"ph4_id": ph4_id, "filename": file.filename or "pharmacophore.ph4"}
+
+
 @app.post("/api/receptor/fetch")
 def fetch_receptor(req: FetchRequest) -> dict:
     pdb_id = req.pdb_id.strip()
@@ -238,6 +281,34 @@ def fetch_receptor(req: FetchRequest) -> dict:
 @app.get("/api/receptor/{receptor_id}/pdb")
 def receptor_pdb(receptor_id: str) -> Response:
     return PlainTextResponse(_receptor_path(receptor_id).read_text())
+
+
+@app.get("/api/pdb_components/{comp_id}/smiles")
+def pdb_component_smiles(comp_id: str) -> dict:
+    """A bound ligand's own PDB Chemical Component Dictionary SMILES, for the
+    "self-dock" button - lets a HETATM group's residue code (e.g. STI) become
+    a ready-to-dock ligand without needing its bond orders/aromaticity
+    guessed back from bare coordinates (unreliable - see backend/rmsd.py's
+    module docstring for how RMSD validation sidesteps that problem)."""
+    comp_id = comp_id.strip().upper()
+    if not COMP_ID_RE.match(comp_id):
+        raise HTTPException(400, "bad chemical component id")
+    url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{comp_id}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(404, f"RCSB has no chemical component {comp_id} ({exc.code})")
+    except Exception as exc:
+        raise HTTPException(502, f"could not reach RCSB: {exc}")
+
+    descriptors = data.get("pdbx_chem_comp_descriptor", [])
+    smiles = next((d["descriptor"] for d in descriptors if d.get("type") == "SMILES_CANONICAL"), None)
+    if smiles is None:
+        smiles = next((d["descriptor"] for d in descriptors if d.get("type") == "SMILES"), None)
+    if smiles is None:
+        raise HTTPException(404, f"RCSB has no SMILES on file for {comp_id}")
+    return {"comp_id": comp_id, "smiles": smiles, "name": data.get("chem_comp", {}).get("name", comp_id)}
 
 
 # ---------------------------------------------------------------------------
@@ -299,15 +370,33 @@ async def parse_ligand_file(file: UploadFile = File(...)) -> dict:
 def create_job(req: JobRequest) -> dict:
     if req.engine not in docking.ENGINES:
         raise HTTPException(400, f"unknown docking engine {req.engine}")
-    engine_exe = config.find_gnina() if req.engine == "gnina" else config.find_smina()
-    if not engine_exe:
-        raise HTTPException(503, f"{req.engine} not installed - run ./setup.sh")
+
+    # Check engine availability
+    if req.engine == "moe":
+        engine_exe = config.find_moebatch()
+        if not engine_exe:
+            raise HTTPException(503, "MOE not installed")
+    elif req.engine == "gnina":
+        engine_exe = config.find_gnina()
+        if not engine_exe:
+            raise HTTPException(503, "gnina not installed - run ./setup.sh")
+    else:
+        engine_exe = config.find_smina()
+        if not engine_exe:
+            raise HTTPException(503, "smina not installed - run ./setup.sh")
+
     if not req.ligands:
         raise HTTPException(400, "no ligands submitted")
     if len(req.ligands) > config.MAX_LIGANDS_PER_JOB:
         raise HTTPException(400, f"too many ligands in one job (max {config.MAX_LIGANDS_PER_JOB})")
-    if req.scoring not in docking.SCORING_FUNCTIONS:
-        raise HTTPException(400, f"unknown scoring function {req.scoring}")
+
+    # Validate scoring function based on engine
+    if req.engine == "moe":
+        if req.scoring not in docking.MOE_SCORING_FUNCTIONS:
+            raise HTTPException(400, f"unknown MOE scoring function {req.scoring}")
+    else:
+        if req.scoring not in docking.SCORING_FUNCTIONS:
+            raise HTTPException(400, f"unknown scoring function {req.scoring}")
     for value in req.size:
         if not (4.0 <= value <= MAX_BOX):
             raise HTTPException(400, f"box edge {value} A outside 4-{MAX_BOX} A")
@@ -320,6 +409,13 @@ def create_job(req: JobRequest) -> dict:
             raise HTTPException(400, str(exc)) from exc
 
     receptor_text = _receptor_path(req.receptor_id).read_text()
+
+    reference_ligand_pdb = None
+    if req.reference_ligand_key:
+        reference_ligand_pdb = prep.het_ligand_pdb_block(receptor_text, req.reference_ligand_key)
+        if reference_ligand_pdb is None:
+            raise HTTPException(400, f"bound ligand {req.reference_ligand_key} not found in receptor")
+
     cleaned = prep.clean_receptor(
         receptor_text,
         keep_waters=req.keep_waters,
@@ -347,6 +443,10 @@ def create_job(req: JobRequest) -> dict:
         use_gpu=req.use_gpu,
         minimize_after_docking=req.minimize_after_docking,
         constraints=[c.model_dump() for c in req.constraints],
+        reference_ligand_pdb=reference_ligand_pdb,
+        moe_placement=req.moe_placement,
+        moe_refinement=req.moe_refinement,
+        ph4_id=req.ph4_id,
     )
     job = MANAGER.submit(cleaned, f"receptor_{req.receptor_id}", specs, params)
     return job.as_dict()
@@ -440,7 +540,8 @@ def _results_csv(job) -> str:
     writer = csv.writer(buf)
     writer.writerow(
         ["name", "smiles", "status", "best_affinity_kcal_per_mol", "n_poses",
-         "all_scores", "all_strain_energies_kcal_per_mol", "constraints_satisfied", "error"]
+         "all_scores", "all_strain_energies_kcal_per_mol", "all_rmsd_to_reference_angstrom",
+         "constraints_satisfied", "error"]
     )
     for lig in job.ligands:
         writer.writerow(
@@ -452,6 +553,7 @@ def _results_csv(job) -> str:
                 lig.n_poses,
                 ";".join(f"{s:.2f}" for s in lig.scores),
                 ";".join("" if e is None else f"{e:.2f}" for e in lig.strain_energies),
+                ";".join("" if r is None else f"{r:.2f}" for r in lig.rmsd_to_reference),
                 "" if lig.constraint_satisfied is None else str(lig.constraint_satisfied),
                 lig.error or "",
             ]

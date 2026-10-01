@@ -71,6 +71,46 @@ def _resname(line: str) -> str:
     return line[17:20].strip().upper()
 
 
+def _element(line: str) -> str:
+    """Element symbol for an ATOM/HETATM line: the dedicated column when
+    present, else a guess from the atom-name field (good enough for the
+    common single-letter elements ligands are mostly made of)."""
+    e = line[76:78].strip().upper()
+    if e:
+        return e
+    return re.sub(r"[^A-Za-z]", "", line[12:16])[:1].upper()
+
+
+def _atom_name(line: str) -> str:
+    """PDB atom-name field (columns 13-16), stripped/uppercased - e.g. "SG"
+    for a cysteine sulfur. Needed for chain:resnum:atom_name identifiers
+    (gnina's --covalent_rec_atom, and backend.covalent.receptor_atom_coords)."""
+    return line[12:16].strip().upper()
+
+
+def het_ligand_pdb_block(pdb_text: str, key: str) -> str | None:
+    """Raw HETATM lines for one list_het_ligands() group, keyed the same way
+    (resname:chain:resseq). Used to pull a bound ligand's real coordinates
+    back out of the ORIGINAL uploaded receptor for RMSD validation, since
+    clean_receptor may have already stripped it out of the docking receptor.
+    None if the key doesn't match anything.
+
+    Alternate-location copies other than "A" are dropped, same as
+    clean_receptor - otherwise a ligand modelled with alt confs would come
+    back with 2-3x its real atom count, which makes every RMSD come out None
+    (the docked pose can never match that composition)."""
+    lines = [
+        line
+        for tag, line in _atom_records(pdb_text)
+        if tag == "HETATM"
+        and line[16] in (" ", "A")
+        and f"{_resname(line)}:{line[21].strip() or '_'}:{line[22:27].strip()}" == key
+    ]
+    if not lines:
+        return None
+    return "\n".join(lines) + "\nEND\n"
+
+
 def list_het_ligands(pdb_text: str, min_atoms: int = 4) -> list[HetLigand]:
     """Group HETATM residues (waters excluded) so the UI can offer them as sites."""
     groups: dict[str, list[str]] = {}

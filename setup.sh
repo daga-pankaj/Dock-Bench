@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install everything the app needs, all inside this directory:
 #   .env-tools/     micromamba prefix holding smina (+ its Open Babel runtime)
-#   .venv/          Python venv holding FastAPI, uvicorn and RDKit
+#   .venv/          Python venv holding FastAPI, uvicorn, RDKit, ProLIF
 #   frontend/node_modules/  Mol* (+ React, esbuild) for the viewer bundle
 #
 # Safe to re-run; existing installs are reused.
@@ -26,7 +26,7 @@ esac
 
 # --- smina via micromamba ---------------------------------------------------
 if [ -x "$TOOLS/bin/smina" ]; then
-  say "smina already installed at $TOOLS/bin/smina"
+  say "smina already installed at $TOOLS/bin/"
 else
   if [ ! -x "$MAMBA" ]; then
     say "downloading micromamba ($PLATFORM)"

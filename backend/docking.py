@@ -14,7 +14,9 @@ from . import pharmacophore as pharm
 RDLogger.DisableLog("rdApp.*")
 
 SCORING_FUNCTIONS = ("vina", "vinardo", "dkoes_scoring", "ad4_scoring")
-ENGINES = ("smina", "gnina")
+# MOE scoring: London dG, GBVI/WSA dG, Affinity dG, ASE, Alpha HB
+MOE_SCORING_FUNCTIONS = ("London dG", "GBVI/WSA dG", "Affinity dG", "ASE", "Alpha HB")
+ENGINES = ("smina", "gnina", "moe")
 
 
 class SminaNotFound(RuntimeError):
@@ -25,7 +27,15 @@ class GninaNotFound(RuntimeError):
     pass
 
 
+class MoeBatchNotFound(RuntimeError):
+    pass
+
+
 class SminaFailed(RuntimeError):
+    pass
+
+
+class MoeDockingFailed(RuntimeError):
     pass
 
 
@@ -51,10 +61,17 @@ class Pose:
 
 
 def _find_engine(engine: str) -> str:
-    finder = config.find_gnina if engine == "gnina" else config.find_smina
+    if engine == "gnina":
+        finder = config.find_gnina
+        exc = GninaNotFound
+    elif engine == "moe":
+        finder = config.find_moebatch
+        exc = MoeBatchNotFound
+    else:
+        finder = config.find_smina
+        exc = SminaNotFound
     exe = finder()
     if not exe:
-        exc = GninaNotFound if engine == "gnina" else SminaNotFound
         raise exc(f"{engine} executable not found; run ./setup.sh")
     return exe
 
@@ -249,10 +266,18 @@ def dock(
     size: tuple[float, float, float],
     log_path: Path | None = None,
     constraints: list[pharm.Constraint] | None = None,
+    engine: str = "smina",
     **kwargs,
 ) -> list[Pose]:
     """Dock one ligand and return its poses, best first (or best-constrained-first, see parse_poses)."""
-    cmd = build_command(receptor, ligand_sdf, out_sdf, center, size, **kwargs)
+    # Route to MOE if specified
+    if engine == "moe":
+        return dock_with_moe(
+            receptor, ligand_sdf, out_sdf, center, size, log_path=log_path, **kwargs
+        )
+
+    # Smina/Gnina workflow
+    cmd = build_command(receptor, ligand_sdf, out_sdf, center, size, engine=engine, **kwargs)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=config.SMINA_TIMEOUT, env=config.subprocess_env(cmd[0])
     )
@@ -308,4 +333,116 @@ def minimize(
         for rank, pose in enumerate(poses, start=1):
             pose.rank = rank
     _rewrite_in_rank_order(out_sdf, poses)
+    return poses
+
+
+def dock_with_moe(
+    receptor: Path,
+    ligand_sdf: Path,
+    out_sdf: Path,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    log_path: Path | None = None,
+    num_modes: int = config.DEFAULT_NUM_MODES,
+    scoring: str = "London dG",
+    placement: str = "Triangle Matcher",
+    refinement: str = "Rigid Receptor",
+    timeout: int = 3600,
+    constraints: list[pharm.Constraint] | None = None,
+    **kwargs,
+) -> list[Pose]:
+    """MOE docking workflow: calls moebatch SVL script that exports to SDF directly."""
+    from . import moe_dock
+
+    moebatch = config.find_moebatch()
+    if not moebatch:
+        raise MoeBatchNotFound("moebatch not found - install MOE")
+
+    # MOE creates temp .mdb, SVL script exports to SDF and deletes MDB
+    out_mdb = out_sdf.with_suffix(".mdb")
+
+    moe_dock.dock(
+        receptor=receptor,
+        ligand=ligand_sdf,
+        out_mdb=out_mdb,
+        out_sdf=out_sdf,
+        center=center,
+        size=size,
+        num_poses=num_modes,
+        scoring=scoring,
+        placement=placement,
+        refinement=refinement,
+        log_path=log_path,
+        timeout=timeout,
+        auto_detect_site=True,  # Use HETATM center with 10Å radius if found
+        ph4_file=kwargs.get('ph4_file'),  # Allow direct .ph4 file upload
+    )
+
+    # Parse SDF with MOE scores (written as SD properties by SVL script)
+    poses = _parse_moe_sdf(out_sdf, constraints=constraints)
+    if not poses:
+        raise MoeDockingFailed("MOE produced no poses")
+    return poses
+
+
+def _parse_moe_sdf(sdf_path: Path, constraints: list[pharm.Constraint] | None = None) -> list[Pose]:
+    """Parse MOE-generated SDF with scores as SD properties."""
+    poses: list[Pose] = []
+    if not sdf_path.exists():
+        return poses
+
+    supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    penalties: list[float] = []
+
+    for i, mol in enumerate(supplier, start=1):
+        if mol is None:
+            continue
+
+        def prop(name: str) -> float | None:
+            if not mol.HasProp(name):
+                return None
+            try:
+                return float(mol.GetProp(name))
+            except ValueError:
+                return None
+
+        # MOE writes primary score as minimizedAffinity (matches smina format)
+        affinity = prop("minimizedAffinity")
+        rmsd = prop("minimizedRMSD")
+
+        pose = Pose(
+            rank=i,
+            affinity=affinity,
+            rmsd_lb=rmsd,
+            rmsd_ub=rmsd,
+            orig_index=i - 1,
+        )
+
+        pen = 0.0
+        if constraints:
+            try:
+                Chem.SanitizeMol(mol)
+                results = pharm.evaluate(mol, constraints)
+                pose.constraint_detail = [r.as_dict() for r in results]
+                pose.constraint_satisfied = pharm.all_required_met(results)
+                pen = pharm.penalty(results, constraints)
+            except Exception:
+                pose.constraint_satisfied = None
+
+        penalties.append(pen)
+        poses.append(pose)
+
+    # Re-rank by constraints if present
+    if constraints:
+        order = sorted(
+            range(len(poses)),
+            key=lambda idx: (
+                not (poses[idx].constraint_satisfied in (True, None)),
+                (poses[idx].affinity or 0.0) + penalties[idx],
+            ),
+        )
+        poses = [poses[idx] for idx in order]
+        for rank, pose in enumerate(poses, start=1):
+            pose.rank = rank
+
     return poses

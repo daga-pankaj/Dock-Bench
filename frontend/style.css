@@ -121,7 +121,7 @@ button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
 .small { font-size: 12px; }
 
 .hetlist { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; max-height: 110px; overflow: auto; }
-.het {
+.het, .predicted-site {
   font-size: 12px;
   padding: 3px 8px;
   border: 1px solid var(--line);
@@ -129,10 +129,13 @@ button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
   background: var(--card2);
   cursor: pointer;
 }
-.het:hover { border-color: var(--accent); }
-.het.active { background: var(--accent); color: #05121f; border-color: var(--accent); }
-.het .n { color: var(--muted); margin-left: 5px; }
-.het.active .n { color: #05121f; }
+.het:hover, .predicted-site:hover { border-color: var(--accent); }
+.het.active, .predicted-site.active { background: var(--accent); color: #05121f; border-color: var(--accent); }
+.het .n, .predicted-site .n { color: var(--muted); margin-left: 5px; }
+.het.active .n, .predicted-site.active .n { color: #05121f; }
+
+details { margin: 8px 0; }
+details summary { cursor: pointer; font-size: 12px; margin-bottom: 6px; }
 
 .chainlist { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 110px; overflow: auto; }
 .chain-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }

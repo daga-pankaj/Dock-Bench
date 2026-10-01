@@ -47,8 +47,9 @@
         <button id="toggleActiveSiteBtn" class="ghost mini" title="minimize this panel">_</button>
       </div>
       <div id="activeSiteBody">
-        <p class="muted small">Click a bound ligand in the viewer to box it, or switch to
-          <b>pick atoms</b> and click residues to build a box from the picks.</p>
+        <p class="muted small">Click <b>Find sites</b> to auto-detect binding pockets, click
+          a bound ligand in the viewer to box it, or switch to <b>pick atoms</b> and
+          click residues to build a box from the picks.</p>
         <div class="row">
           <div class="seg">
             <button class="segbtn active" data-mode="ligand">click ligand</button>
@@ -56,7 +57,20 @@
           </div>
           <button id="clearPicks" class="ghost">clear picks</button>
         </div>
-        <div id="hetList" class="hetlist"></div>
+        <details>
+          <summary class="muted small">Bound ligands (click to set site)</summary>
+          <div id="hetList" class="hetlist"></div>
+        </details>
+        <label><input type="checkbox" id="validateRmsd"> validate: after docking, compute RMSD of each
+          pose vs the selected bound ligand's real position</label>
+        <div class="row">
+          <button id="selfDockBtn" class="ghost">Self-dock selected bound ligand (test)</button>
+          <span class="muted small">looks up its SMILES from RCSB and loads it as the ligand to dock</span>
+        </div>
+        <div class="row">
+          <input id="selfDockSmiles" placeholder="or paste its SMILES (e.g. a novel/in-house ligand not on RCSB)">
+          <button id="selfDockManualBtn" class="ghost">Self-dock with this SMILES</button>
+        </div>
         <p class="muted small">A co-crystallized peptide/peptidomimetic ligand is its own
           chain, not a bound-ligand group above - tick it here to delete it from the
           receptor before docking (its own pocket would otherwise stay occupied).</p>
@@ -83,11 +97,20 @@
         <button id="togglePharmacophoreBtn" class="ghost mini" title="minimize this panel">_</button>
       </div>
       <div id="pharmacophoreBody">
-        <p class="muted small">Checked against each pose after docking (smina/gnina have no way to bias
-          the search itself toward a point) - poses meeting every "required" constraint are ranked first.
-          Click "pick point", then click an atom in the viewer.</p>
-        <div id="constraintList" class="constraintlist"></div>
-        <button id="addConstraint" class="ghost">+ add constraint</button>
+        <div id="sminaGninaConstraints">
+          <p class="muted small">Checked against each pose after docking (smina/gnina have no way to bias
+            the search itself toward a point) - poses meeting every "required" constraint are ranked first.
+            Click "pick point", then click an atom in the viewer.</p>
+          <div id="constraintList" class="constraintlist"></div>
+          <button id="addConstraint" class="ghost">+ add constraint</button>
+        </div>
+        <div id="moeConstraints" style="display:none;">
+          <p class="muted small"><strong>MOE pharmacophore (.ph4 file)</strong> - upload a MOE pharmacophore query file to constrain docking.</p>
+          <div class="row">
+            <label class="filebtn">Upload .ph4 file<input type="file" id="moePh4File" accept=".ph4"></label>
+            <span class="muted small" id="moePh4Name"></span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -120,14 +143,15 @@
           <select id="engineSel">
             <option value="smina">smina (CPU)</option>
             <option value="gnina">gnina (CPU/GPU)</option>
+            <option value="moe">MOE</option>
           </select>
         </label>
       </div>
-      <div class="row">
+      <div class="row" id="sminaGninaParamsRow">
         <label class="inline" title="raises exhaustiveness/energy range to search the larger, floppier conformer space peptides and peptidomimetics need">
           <input type="checkbox" id="peptideMode"> peptide / peptidomimetic ligands (bump exhaustiveness &amp; energy range)</label>
       </div>
-      <div class="row">
+      <div class="row" id="sminaGninaMinimizeRow">
         <label class="inline" title="extra smina/gnina --minimize pass on every pose after its own docking search finishes - relaxes clashes a coarse exhaustiveness/energy range left behind">
           <input type="checkbox" id="minimizeAfterDocking"> minimize each pose after docking</label>
       </div>
@@ -139,6 +163,29 @@
           </select>
         </label>
         <span id="gpuInfo" class="muted small"></span>
+      </div>
+      <div class="grid3" id="moeParamsRow" style="display:none;">
+        <label>placement
+          <select id="moePlacement">
+            <option value="Triangle Matcher">Triangle Matcher</option>
+            <option value="Alpha PMI">Alpha PMI</option>
+            <option value="Pharmacophore">Pharmacophore</option>
+            <option value="Proxy Triangle">Proxy Triangle</option>
+            <option value="Alpha Triangle">Alpha Triangle</option>
+          </select>
+        </label>
+        <label>refinement
+          <select id="moeRefinement">
+            <option value="Rigid Receptor">Rigid Receptor</option>
+            <option value="Induced Fit">Induced Fit</option>
+            <option value="Rigid Body">Rigid Body</option>
+            <option value="None">None</option>
+          </select>
+        </label>
+      </div>
+      <div class="row" id="moePh4Row" style="display:none;">
+        <label class="filebtn">Upload .ph4 pharmacophore (optional)<input type="file" id="moePh4File" accept=".ph4"></label>
+        <span class="muted small" id="moePh4Name"></span>
       </div>
       <div class="row">
         <button id="runBtn" class="primary">Run</button>
@@ -184,7 +231,7 @@
         </div>
       </div>
       <table id="results">
-        <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th>constraints</th><th></th></tr></thead>
+        <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th>constraints</th><th>RMSD Å</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
       <p id="resultsEmpty" class="muted small">No job yet. Results appear here as each ligand finishes.</p>

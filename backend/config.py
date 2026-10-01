@@ -85,6 +85,34 @@ def find_gnina() -> str | None:
     return shutil.which("gnina")
 
 
+def find_moebatch() -> str | None:
+    """Locate moebatch executable for MOE docking.
+
+    Checks common macOS install paths, versioned installs, then PATH.
+    """
+    override = os.environ.get("MOEBATCH_BIN")
+    if override and Path(override).exists():
+        return override
+
+    # Common MOE install paths on macOS
+    candidates = [
+        Path("/Applications/moe2024.0604/bin/moebatch"),
+        Path("/Applications/moe/bin/moebatch"),
+    ]
+
+    # Check versioned installs
+    apps = Path("/Applications")
+    if apps.is_dir():
+        for moe_dir in sorted(apps.glob("moe*"), reverse=True):
+            candidates.append(moe_dir / "bin" / "moebatch")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return shutil.which("moebatch")
+
+
 def subprocess_env(exe: str) -> dict[str, str]:
     """Environment for running a bundled tool (smina/gnina) as a subprocess.
 

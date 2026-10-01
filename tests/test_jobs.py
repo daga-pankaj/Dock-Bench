@@ -133,3 +133,18 @@ def test_manager_submit_creates_job_and_lists_it(isolated_runs_dir, monkeypatch)
     assert manager.get(job.id) is job
     listed = manager.list_jobs()
     assert any(j["id"] == job.id for j in listed)
+
+
+# -- covalent docking ---------------------------------------------------------
+
+
+def _fake_dock(captured):
+    def dock(**kwargs):
+        captured.update(kwargs)
+        from backend import docking
+        return [docking.Pose(rank=1, affinity=-5.0, rmsd_lb=0.0, rmsd_ub=0.0)]
+    return dock
+
+
+
+

@@ -187,8 +187,9 @@ const AROMATIC_RINGS = {
 };
 
 // Given the clicked location, resolve the aromatic ring (if any) the clicked
-// atom belongs to and return its centroid - null if the residue/atom isn't
+// atom belongs to and return {centroid, normal} - null if the residue/atom isn't
 // part of a recognized aromatic ring, or the ring came back incomplete.
+// Normal vector computed via cross product of first two edges, normalized.
 function ringCentroidAt(loc, resn, atomName) {
   const rings = AROMATIC_RINGS[resn];
   if (!rings) return null;
@@ -211,7 +212,21 @@ function ringCentroidAt(loc, resn, atomName) {
   if (pts.length < ring.length) return null; // incomplete ring - don't trust a partial centroid
   const n = pts.length;
   const sum = pts.reduce((a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]], [0, 0, 0]);
-  return [sum[0] / n, sum[1] / n, sum[2] / n];
+  const centroid = [sum[0] / n, sum[1] / n, sum[2] / n];
+
+  // Compute plane normal: cross product of two edge vectors
+  if (pts.length < 3) return { centroid, normal: null };
+  const v1 = [pts[1][0] - pts[0][0], pts[1][1] - pts[0][1], pts[1][2] - pts[0][2]];
+  const v2 = [pts[2][0] - pts[0][0], pts[2][1] - pts[0][1], pts[2][2] - pts[0][2]];
+  const cross = [
+    v1[1] * v2[2] - v1[2] * v2[1],
+    v1[2] * v2[0] - v1[0] * v2[2],
+    v1[0] * v2[1] - v1[1] * v2[0]
+  ];
+  const mag = Math.sqrt(cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2);
+  const normal = mag > 0 ? [cross[0] / mag, cross[1] / mag, cross[2] / mag] : null;
+
+  return { centroid, normal };
 }
 
 function onPluginClick(event) {
@@ -395,7 +410,10 @@ async function drawBox() {
   boxRefs = [...refs, rep].filter(Boolean);
 
   const vol = (s[0] * s[1] * s[2]).toFixed(0);
-  $("siteInfo").textContent = `box ${s.map((v) => v.toFixed(1)).join(" x ")} A  (${vol} A^3)`;
+  const siteInfo = $("siteInfo");
+  if (siteInfo) {
+    siteInfo.textContent = `box ${s.map((v) => v.toFixed(1)).join(" x ")} A  (${vol} A^3)`;
+  }
 }
 
 async function rebuildPicks() {
@@ -417,11 +435,82 @@ async function rebuildConstraintMarkers() {
   const placed = S.constraints.filter((c) => [c.x, c.y, c.z].every(Number.isFinite));
   if (!placed.length) return;
 
-  const lines = placed.map((c, i) => pdbAtomLine(i + 1, "C", "PHC", "Z", i + 1, c.x, c.y, c.z, "C"));
-  const { structure, refs } = await loadSyntheticPdb(lines.join("\n") + "\nEND\n", "constraints");
-  const rep = await addRep(structure, "spacefill", "uniform", { value: Color(0xff6bd6) }, { sizeFactor: 0.45 });
-  constraintMarkerRefs = [...refs, rep].filter(Boolean);
+  // Build one structure per constraint type for separate coloring
+  for (const c of placed) {
+    const color = CONSTRAINT_COLORS[c.kind] || 0xff6bd6;
+    const lines = [];
+    let serial = 1;
+
+    // Center point
+    lines.push(pdbAtomLine(serial++, "C", "PHC", "Z", 1, c.x, c.y, c.z, "C"));
+
+    // Aromatic: disk in plane with normal
+    if (c.kind === "aromatic" && [c.nx, c.ny, c.nz].every(Number.isFinite)) {
+      const diskRadius = 1.5;
+      const nSteps = 16;
+      // Find two orthogonal vectors in the plane
+      const n = [c.nx, c.ny, c.nz];
+      const up = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+      const u = [
+        up[1] * n[2] - up[2] * n[1],
+        up[2] * n[0] - up[0] * n[2],
+        up[0] * n[1] - up[1] * n[0]
+      ];
+      const uMag = Math.sqrt(u[0] ** 2 + u[1] ** 2 + u[2] ** 2);
+      const u1 = [u[0] / uMag, u[1] / uMag, u[2] / uMag];
+      const v = [
+        n[1] * u1[2] - n[2] * u1[1],
+        n[2] * u1[0] - n[0] * u1[2],
+        n[0] * u1[1] - n[1] * u1[0]
+      ];
+      for (let i = 0; i <= nSteps; i++) {
+        const theta = (2 * Math.PI * i) / nSteps;
+        const px = c.x + diskRadius * (Math.cos(theta) * u1[0] + Math.sin(theta) * v[0]);
+        const py = c.y + diskRadius * (Math.cos(theta) * u1[1] + Math.sin(theta) * v[1]);
+        const pz = c.z + diskRadius * (Math.cos(theta) * u1[2] + Math.sin(theta) * v[2]);
+        lines.push(pdbAtomLine(serial++, "C", "PHC", "Z", serial, px, py, pz, "C"));
+      }
+    }
+
+    // H-bond: arrow showing direction
+    else if (["hbond_donor", "hbond_acceptor"].includes(c.kind) && [c.dx, c.dy, c.dz].every(Number.isFinite)) {
+      const arrowLen = 2.0;
+      const tipLen = 0.5;
+      // Shaft
+      for (let t = 0; t <= 1; t += 0.2) {
+        const px = c.x + t * arrowLen * c.dx;
+        const py = c.y + t * arrowLen * c.dy;
+        const pz = c.z + t * arrowLen * c.dz;
+        lines.push(pdbAtomLine(serial++, "C", "PHC", "Z", serial, px, py, pz, "C"));
+      }
+      // Arrowhead (simple cone approximation)
+      const tip = [c.x + arrowLen * c.dx, c.y + arrowLen * c.dy, c.z + arrowLen * c.dz];
+      const base = [c.x + (arrowLen - tipLen) * c.dx, c.y + (arrowLen - tipLen) * c.dy, c.z + (arrowLen - tipLen) * c.dz];
+      const perp = Math.abs(c.dz) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+      const p1 = [
+        perp[1] * c.dz - perp[2] * c.dy,
+        perp[2] * c.dx - perp[0] * c.dz,
+        perp[0] * c.dy - perp[1] * c.dx
+      ];
+      const p1Mag = Math.sqrt(p1[0] ** 2 + p1[1] ** 2 + p1[2] ** 2);
+      const p1n = [p1[0] / p1Mag, p1[1] / p1Mag, p1[2] / p1Mag];
+      for (let i = 0; i < 4; i++) {
+        const theta = (Math.PI * i) / 2;
+        const px = base[0] + 0.3 * Math.cos(theta) * p1n[0];
+        const py = base[1] + 0.3 * Math.cos(theta) * p1n[1];
+        const pz = base[2] + 0.3 * Math.cos(theta) * p1n[2];
+        for (const pt of edgePoints([px, py, pz], tip, 0.5)) {
+          lines.push(pdbAtomLine(serial++, "C", "PHC", "Z", serial, pt[0], pt[1], pt[2], "C"));
+        }
+      }
+    }
+
+    const { structure, refs } = await loadSyntheticPdb(lines.join("\n") + "\nEND\n", `constraint-${c.id}`);
+    const rep = await addRep(structure, "ball-and-stick", "uniform", { value: Color(color) }, { sizeFactor: 0.25 });
+    constraintMarkerRefs.push(...refs, rep);
+  }
 }
+
 
 function setBox(center, size) {
   ["cx", "cy", "cz"].forEach((id, i) => ($(id).value = center[i].toFixed(2)));
@@ -480,24 +569,63 @@ function onAtomClick(atom) {
   // matter what the box-picking mode ("click ligand" / "pick atoms") is.
   if (S.pendingPickId != null) {
     const c = S.constraints.find((c) => c.id === S.pendingPickId);
-    S.pendingPickId = null;
-    if (c) {
-      // "aromatic" anchors to the whole ring's centroid, not one ring atom -
-      // that's the real pi-stacking feature. Falls back to the clicked atom
-      // itself if it isn't part of a recognized aromatic ring.
-      const useRing = c.kind === "aromatic" && atom.ring;
-      const [x, y, z] = useRing ? atom.ring : [atom.x, atom.y, atom.z];
-      c.x = x; c.y = y; c.z = z;
+    if (!c) { S.pendingPickId = null; return; }
+
+    const needsDirection = ["hbond_donor", "hbond_acceptor"].includes(c.kind);
+    const hasPoint = [c.x, c.y, c.z].every(Number.isFinite);
+
+    // H-bond: two-click mode - first click = point, second click = direction
+    if (needsDirection && hasPoint) {
+      // Second click: compute direction vector from point to this atom
+      const dx = atom.x - c.x;
+      const dy = atom.y - c.y;
+      const dz = atom.z - c.z;
+      const mag = Math.sqrt(dx ** 2 + dy ** 2 + dz ** 2);
+      if (mag < 0.1) {
+        toast("direction atom too close to constraint point - pick a different atom", true);
+        return;
+      }
+      c.dx = dx / mag; c.dy = dy / mag; c.dz = dz / mag;
+      S.pendingPickId = null;
       renderConstraints();
       rebuildConstraintMarkers();
-      if (c.kind === "aromatic" && !atom.ring) {
-        toast(`${atom.resn}${atom.resi} isn't a recognized aromatic ring atom - using the clicked atom itself`, true);
-      } else {
-        toast(useRing
-          ? `constraint point set to ring centroid of ${atom.resn}${atom.resi}`
-          : `constraint point set from ${atom.resn}${atom.resi} ${atom.atom}`);
-      }
+      toast(`direction set from ${atom.resn}${atom.resi} ${atom.atom}`);
+      return;
     }
+
+    // First click (or single-click for non-H-bond types)
+    S.pendingPickId = needsDirection && hasPoint ? null : S.pendingPickId;
+
+    // Aromatic: use ring centroid + plane normal
+    if (c.kind === "aromatic" && atom.ring) {
+      c.x = atom.ring.centroid[0];
+      c.y = atom.ring.centroid[1];
+      c.z = atom.ring.centroid[2];
+      if (atom.ring.normal) {
+        c.nx = atom.ring.normal[0];
+        c.ny = atom.ring.normal[1];
+        c.nz = atom.ring.normal[2];
+      }
+      S.pendingPickId = null;
+      renderConstraints();
+      rebuildConstraintMarkers();
+      toast(`aromatic plane set from ${atom.resn}${atom.resi} ring`);
+      return;
+    }
+
+    // Everything else: single click sets point
+    c.x = atom.x; c.y = atom.y; c.z = atom.z;
+    if (needsDirection) {
+      toast(`point set - now click a second atom to define ${c.kind === "hbond_donor" ? "donor" : "acceptor"} direction`);
+      // Keep S.pendingPickId active for second click
+    } else {
+      S.pendingPickId = null;
+      renderConstraints();
+      rebuildConstraintMarkers();
+      toast(`constraint point set from ${atom.resn}${atom.resi} ${atom.atom}`);
+    }
+    renderConstraints();
+    rebuildConstraintMarkers();
     return;
   }
 
@@ -525,10 +653,11 @@ function onAtomClick(atom) {
 
 function renderHetList() {
   const box = $("hetList");
+  if (!box) return;
   box.innerHTML = "";
   const hets = S.receptor.het_ligands || [];
   if (!hets.length) {
-    box.innerHTML = '<span class="muted small">no bound ligands found - use "pick atoms"</span>';
+    box.innerHTML = '<span class="muted small">no bound ligands found - use "pick atoms" or "find sites"</span>';
     return;
   }
   hets.forEach((h) => {
@@ -546,6 +675,7 @@ function renderHetList() {
 // can be ticked for deletion from the receptor before docking.
 function renderChainList() {
   const box = $("chainList");
+  if (!box) return;
   box.innerHTML = "";
   const chains = S.receptor.chains || [];
   if (chains.length < 2) {
@@ -570,8 +700,11 @@ function renderChainList() {
 async function loadReceptor(meta) {
   S.receptor = meta;
   S.pdbText = await api(`/api/receptor/${meta.id}/pdb`);
-  $("receptorInfo").textContent =
-    `${meta.name} - ${meta.n_protein_atoms} protein atoms - ${(meta.het_ligands || []).length} het groups`;
+  const receptorInfo = $("receptorInfo");
+  if (receptorInfo) {
+    receptorInfo.textContent =
+      `${meta.name} - ${meta.n_protein_atoms} protein atoms - ${(meta.het_ligands || []).length} het groups`;
+  }
 
   clearPoses();
   await deleteRefs(boxRefs); boxRefs = [];
@@ -640,6 +773,16 @@ const CONSTRAINT_KIND_LABELS = {
   smarts: "SMARTS match",
 };
 
+// Color per constraint type for visualization
+const CONSTRAINT_COLORS = {
+  hbond_donor: 0x4a90e2,      // blue
+  hbond_acceptor: 0xe24a4a,   // red
+  positional: 0xf5a623,       // yellow
+  aromatic: 0x9b59d6,         // purple
+  metal_coordination: 0x27ae60, // green
+  smarts: 0x1abc9c,           // cyan
+};
+
 // Typical contact distance per kind, shown as a hint next to the radius
 // field - not enforced, just a starting point for the ones that aren't 3.5A.
 const CONSTRAINT_RADIUS_HINT = {
@@ -656,6 +799,10 @@ function addConstraintRow() {
     id: ++constraintSeq,
     kind: "hbond_donor",
     x: undefined, y: undefined, z: undefined,
+    // Direction vector for H-bond donor/acceptor (dx, dy, dz)
+    dx: undefined, dy: undefined, dz: undefined,
+    // Normal vector for aromatic plane (nx, ny, nz)
+    nx: undefined, ny: undefined, nz: undefined,
     radius: 3.5,
     required: true,
     label: "",
@@ -673,6 +820,7 @@ function removeConstraintRow(id) {
 
 function renderConstraints() {
   const box = $("constraintList");
+  if (!box) return;
   box.innerHTML = "";
   S.constraints.forEach((c) => {
     const row = document.createElement("div");
@@ -684,9 +832,23 @@ function renderConstraints() {
     const smartsRow = c.kind === "smarts"
       ? `<input class="c-smarts" type="text" placeholder="SMARTS pattern, e.g. [OX1]=[C,S]" value="${c.smarts || ""}">`
       : "";
+
+    // Status badge for direction/normal
+    const hasPoint = [c.x, c.y, c.z].every(Number.isFinite);
+    const hasDir = ["hbond_donor", "hbond_acceptor"].includes(c.kind) && [c.dx, c.dy, c.dz].every(Number.isFinite);
+    const hasNormal = c.kind === "aromatic" && [c.nx, c.ny, c.nz].every(Number.isFinite);
+    let statusBadge = "";
+    if (["hbond_donor", "hbond_acceptor"].includes(c.kind)) {
+      statusBadge = hasPoint && hasDir ? '<span class="tag done">✓ directional</span>' :
+                    hasPoint ? '<span class="tag warn">needs direction</span>' : '';
+    } else if (c.kind === "aromatic") {
+      statusBadge = hasNormal ? '<span class="tag done">✓ planar</span>' : '';
+    }
+
     row.innerHTML = `
       <select class="c-kind" title="${CONSTRAINT_RADIUS_HINT[c.kind] || ""}">${kindOpts}</select>
       <button class="ghost c-pick" type="button">pick point</button>
+      ${statusBadge}
       <input class="c-x" type="number" step="0.1" placeholder="x" value="${pt(c.x)}">
       <input class="c-y" type="number" step="0.1" placeholder="y" value="${pt(c.y)}">
       <input class="c-z" type="number" step="0.1" placeholder="z" value="${pt(c.z)}">
@@ -740,6 +902,54 @@ function buildConstraintsPayload() {
   }));
 }
 
+// Loads `smiles` as the ligand to dock (named after the selected bound
+// ligand) and turns on RMSD validation against it - shared by both
+// self-dock buttons below (RCSB-looked-up SMILES, or one pasted by hand).
+// The RMSD itself isn't computed here - ticking validateRmsd just makes the
+// next runDocking() send reference_ligand_key, and backend/jobs.py computes
+// it per pose once that job actually runs (see backend/rmsd.py).
+async function loadSelfDockLigand(smiles, label) {
+  const data = await api("/api/ligands/parse_text", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: `${smiles} ${S.activeHet.resname}_bound` }),
+  });
+  if (!data.n_valid) throw new Error("that SMILES didn't parse");
+  showLigands(data);
+  $("validateRmsd").checked = true;
+  toast(`loaded ${S.activeHet.resname}${label ? ` (${label})` : ""} for self-docking - run docking to get RMSD`);
+}
+
+// Convenience for repeated redocking tests: fetch the selected bound
+// ligand's own SMILES from RCSB's Chemical Component Dictionary (keyed by
+// its 3-letter residue code) instead of pasting it in by hand every time.
+async function selfDockFromBoundLigand() {
+  if (!S.activeHet) return toast("pick a bound ligand above first", true);
+  const btn = $("selfDockBtn");
+  btn.disabled = true;
+  try {
+    const { smiles, name } = await api(`/api/pdb_components/${encodeURIComponent(S.activeHet.resname)}/smiles`);
+    await loadSelfDockLigand(smiles, name);
+  } catch (err) {
+    toast(err.message, true);
+  }
+  btn.disabled = false;
+}
+
+// Same, but for a ligand that isn't on RCSB at all (a novel/in-house
+// compound crystallized in your own receptor) - you supply its SMILES
+// yourself instead of it being looked up.
+async function selfDockWithManualSmiles() {
+  if (!S.activeHet) return toast("pick a bound ligand above first", true);
+  const smiles = $("selfDockSmiles").value.trim();
+  if (!smiles) return toast("paste the bound ligand's SMILES first", true);
+  try {
+    await loadSelfDockLigand(smiles);
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // jobs
 // ---------------------------------------------------------------------------
@@ -751,6 +961,9 @@ async function runDocking() {
   if (!center) return toast("define the active site first", true);
   const constraints = buildConstraintsPayload();
   if (constraints === null) return;
+  if ($("validateRmsd").checked && !S.activeHet) {
+    return toast("RMSD validation needs a bound ligand selected above as the site", true);
+  }
 
   const body = {
     receptor_id: S.receptor.id,
@@ -770,6 +983,10 @@ async function runDocking() {
     exclude_chains: [...S.excludeChains],
     trim_distant_chains: $("trimChains").checked,
     constraints,
+    reference_ligand_key: $("validateRmsd").checked ? S.activeHet.key : null,
+    moe_placement: $("moePlacement").value,
+    moe_refinement: $("moeRefinement").value,
+    ph4_id: S.ph4_id || null,
   };
 
   $("runBtn").disabled = true;
@@ -809,6 +1026,18 @@ function startPolling(jobId) {
         $("cancelBtn").disabled = true;
         const ok = job.ligands.filter((l) => l.status === "done").length;
         toast(`job ${job.status}: ${ok}/${job.n_ligands} docked`);
+        // A structure mismatch (docked ligand isn't really the same molecule
+        // as the bound reference - wrong SMILES, wrong bound ligand picked,
+        // etc) makes obrms report "inf" for every pose with no error
+        // anywhere - silent enough that it's worth calling out explicitly
+        // rather than just leaving the RMSD column blank. See backend/rmsd.py.
+        const wantedRmsd = job.params.reference_ligand_pdb;
+        const doneLigs = job.ligands.filter((l) => l.status === "done");
+        const gotNoRmsd = doneLigs.length > 0 && doneLigs.every(
+          (l) => !l.rmsd_to_reference || l.rmsd_to_reference.every((r) => r === null));
+        if (wantedRmsd && gotNoRmsd) {
+          toast("RMSD validation was on, but no docked pose matched the bound ligand's heavy-atom structure - double check the SMILES you docked is really the same molecule as the crystal ligand", true);
+        }
       }
     } catch (err) {
       clearInterval(S.poll);
@@ -828,6 +1057,7 @@ function constraintBadge(lig) {
     .join("\n");
   return `<span class="tag ${good ? "done" : "unset"}" title="${detail.replace(/"/g, "&quot;")}">${good ? "✓ met" : "✗ unmet"}</span>`;
 }
+
 
 function renderJob(job) {
   const pct = job.n_ligands ? (100 * job.n_finished) / job.n_ligands : 0;
@@ -850,12 +1080,19 @@ function renderJob(job) {
     const score = lig.best_score === null ? "-" : lig.best_score.toFixed(2);
     const hasBreakdown = lig.scores && lig.scores.length > 1;
     const expanded = S.expandedResultRows.has(lig.name);
+    // rmsd_to_reference[0] is the top-ranked pose's RMSD to the receptor's
+    // own bound-ligand position (backend/rmsd.py) - only present for a
+    // validation run, and only non-null for the ligand that matched it.
+    const topRmsd = lig.rmsd_to_reference && lig.rmsd_to_reference[0];
+    const rmsdText = topRmsd === null || topRmsd === undefined ? "" :
+      `<span class="tag ${topRmsd <= 2.0 ? "done" : "unset"}">${topRmsd.toFixed(2)}</span>`;
     tr.innerHTML = `
       <td title="${lig.smiles || ""}">${lig.name}</td>
       <td><span class="tag ${lig.status}">${lig.status}</span></td>
       <td class="score">${score}${hasBreakdown ? ` <button class="ghost mini posetoggle" title="show every pose's score/strain">${expanded ? "▴" : "▾"}</button>` : ""}</td>
       <td>${lig.n_poses || ""}</td>
       <td>${constraintBadge(lig)}</td>
+      <td>${rmsdText}</td>
       <td></td>`;
     if (lig.error) tr.querySelector("td:nth-child(2)").title = lig.error;
 
@@ -890,9 +1127,11 @@ function renderJob(job) {
       const cells = lig.scores.map((s, i) => {
         const strain = lig.strain_energies && lig.strain_energies[i];
         const strainText = strain === null || strain === undefined ? "" : ` <span class="muted">strain ${strain.toFixed(1)}</span>`;
-        return `<span class="posecell">#${i + 1} ${s.toFixed(2)} kcal/mol${strainText}</span>`;
+        const r = lig.rmsd_to_reference && lig.rmsd_to_reference[i];
+        const rmsdText = r === null || r === undefined ? "" : ` <span class="muted">rmsd ${r.toFixed(2)} Å</span>`;
+        return `<span class="posecell">#${i + 1} ${s.toFixed(2)} kcal/mol${strainText}${rmsdText}</span>`;
       }).join("");
-      detailTr.innerHTML = `<td colspan="6">${cells}</td>`;
+      detailTr.innerHTML = `<td colspan="7">${cells}</td>`;
       tbody.appendChild(detailTr);
     }
   });
@@ -1057,6 +1296,32 @@ async function showInteractions(idx) {
 }
 
 // ---------------------------------------------------------------------------
+// scoring dropdown helper
+// ---------------------------------------------------------------------------
+
+function updateScoringOptions(engine) {
+  const scoringSelect = $("scoring");
+  scoringSelect.innerHTML = "";
+
+  if (engine === "moe" && window.APP_STATUS?.moe_scoring_functions) {
+    window.APP_STATUS.moe_scoring_functions.forEach(fn => {
+      const opt = document.createElement("option");
+      opt.value = fn;
+      opt.textContent = fn;
+      scoringSelect.appendChild(opt);
+    });
+  } else if (window.APP_STATUS?.scoring_functions) {
+    window.APP_STATUS.scoring_functions.forEach(fn => {
+      const opt = document.createElement("option");
+      opt.value = fn;
+      opt.textContent = fn;
+      scoringSelect.appendChild(opt);
+    });
+    scoringSelect.value = "vina";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // wiring
 // ---------------------------------------------------------------------------
 
@@ -1125,6 +1390,9 @@ function wire() {
   };
 
   $("clearPicks").onclick = clearPicks;
+  $("selfDockBtn").onclick = selfDockFromBoundLigand;
+  $("selfDockManualBtn").onclick = selfDockWithManualSmiles;
+  $("selfDockSmiles").onkeydown = (e) => { if (e.key === "Enter") $("selfDockManualBtn").click(); };
   $("addConstraint").onclick = addConstraintRow;
   $("hideLigandBtn").onclick = () => {
     S.hideOrigLigand = !S.hideOrigLigand;
@@ -1153,6 +1421,7 @@ function wire() {
   panelToggle("toggleActiveSiteBtn", "activeSiteBody", "activeSitePanelHidden");
   panelToggle("togglePharmacophoreBtn", "pharmacophoreBody", "pharmacophorePanelHidden");
   panelToggle("toggleLigandsBtn", "ligandsBody", "ligandsPanelHidden");
+
   $("cubeBtn").onclick = () => {
     const s = boxSize().filter(Number.isFinite);
     if (!s.length) return;
@@ -1166,6 +1435,21 @@ function wire() {
     if (S.activeHet) zoomToExpression(hetExpr(S.activeHet));
     else if (S.picks.length) toast("zoom not available for free-hand picks yet - drag/scroll to frame the box", true);
     else toast("set a docking box first", true);
+  };
+
+  $("moePh4File").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const data = await api("/api/pharmacophore/upload", { method: "POST", body: fd });
+      S.ph4_id = data.ph4_id;
+      $("moePh4Name").textContent = data.filename;
+      toast(`uploaded ${data.filename}`);
+    } catch (err) {
+      toast(err.message || "failed to upload .ph4 file", true);
+    }
   };
 
   $("runBtn").onclick = runDocking;
@@ -1182,7 +1466,27 @@ function wire() {
   });
 
   $("engineSel").onchange = () => {
-    $("gpuRow").style.display = $("engineSel").value === "gnina" ? "flex" : "none";
+    const engine = $("engineSel").value;
+    const isMoe = engine === "moe";
+    const isGnina = engine === "gnina";
+
+    // Show/hide GPU row for gnina
+    $("gpuRow").style.display = isGnina ? "flex" : "none";
+
+    // Show/hide MOE-specific params
+    $("moeParamsRow").style.display = isMoe ? "grid" : "none";
+    $("moePh4Row").style.display = "none";
+
+    // Hide smina/gnina params for MOE
+    $("sminaGninaParamsRow").style.display = isMoe ? "none" : "flex";
+    $("sminaGninaMinimizeRow").style.display = isMoe ? "none" : "flex";
+
+    // Show/hide pharmacophore constraints based on engine
+    $("sminaGninaConstraints").style.display = isMoe ? "none" : "block";
+    $("moeConstraints").style.display = isMoe ? "block" : "none";
+
+    // Update scoring dropdown based on engine
+    updateScoringOptions(engine);
   };
 }
 
@@ -1191,19 +1495,44 @@ async function boot() {
   wire();
   try {
     const st = await api("/api/status");
-    const sel = $("scoring");
-    st.scoring_functions.forEach((s) => {
-      const o = document.createElement("option");
-      o.value = o.textContent = s;
-      sel.appendChild(o);
-    });
+    window.APP_STATUS = st;  // Store for updateScoringOptions
+
+    // Populate engine selector based on available engines
+    const engineSel = $("engineSel");
+    engineSel.innerHTML = "";
+    if (st.smina) {
+      const opt = document.createElement("option");
+      opt.value = "smina";
+      opt.textContent = "smina (CPU)";
+      engineSel.appendChild(opt);
+    }
+    // Always show Gnina option
+    const optGnina = document.createElement("option");
+    optGnina.value = "gnina";
+    optGnina.textContent = st.gnina ? "gnina (CPU/GPU)" : "gnina (not installed)";
+    optGnina.disabled = !st.gnina;
+    engineSel.appendChild(optGnina);
+
+    if (st.moe_available) {
+      const opt = document.createElement("option");
+      opt.value = "moe";
+      opt.textContent = "MOE";
+      engineSel.appendChild(opt);
+    }
+
+    // Initial scoring options for default engine
+    updateScoringOptions(engineSel.value);
+
     $("modes").value = st.default_num_modes;
 
     const pill = $("engine");
     const parts = [];
     parts.push(st.smina ? (st.smina_version || "smina") : "smina not found");
     parts.push(st.gnina ? (st.gnina_version || "gnina") : "gnina not found");
-    pill.className = "pill " + (st.smina || st.gnina ? "ok" : "bad");
+    if (st.moe_available) {
+      parts.push("MOE available");
+    }
+    pill.className = "pill " + (st.smina || st.gnina || st.moe_available ? "ok" : "bad");
     pill.textContent = `${parts.join(" - ")} - ${st.workers} workers${st.gpu_available ? " - GPU detected" : ""}`;
 
     $("gpuInfo").textContent = st.gpu_available
