@@ -3,6 +3,7 @@
 function Open;
 function Close;
 function Atoms;
+function Add_H;
 function Dock;
 function db_ExportSD;
 function ph4_aType;
@@ -11,6 +12,10 @@ global function main []
     local site_atoms, rec, lig, site, opt, all_atoms, distances, protein_atoms, ph4_data;
 
     Open '{RECEPTOR_FILE}';
+
+    // Dock calls Add_H on the receptor internally; doing it up front keeps
+    // atom indices (e.g. opt.rxsite for covalent docking) stable.
+    Add_H Atoms [];
 
     all_atoms = Atoms [];
     protein_atoms = all_atoms | aResidue all_atoms <> '';

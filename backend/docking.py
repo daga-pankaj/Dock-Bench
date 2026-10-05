@@ -421,9 +421,9 @@ def _parse_moe_sdf(sdf_path: Path, constraints: list[pharm.Constraint] | None = 
             except ValueError:
                 return None
 
-        # MOE writes primary score as minimizedAffinity (matches smina format)
-        affinity = prop("minimizedAffinity")
-        rmsd = prop("minimizedRMSD")
+        # db_ExportSD writes MOE's native fields: S = final score, rmsd_refine.
+        affinity = prop("S") if mol.HasProp("S") else prop("minimizedAffinity")
+        rmsd = prop("rmsd_refine") if mol.HasProp("rmsd_refine") else prop("minimizedRMSD")
 
         pose = Pose(
             rank=i,

@@ -94,18 +94,11 @@ def _build_moe_atom_selection(residue_spec: str) -> tuple[str, int, str]:
 
 
 def _build_simple_atom_filter(chain: str, resnum: int, atom_name: str) -> str:
-    """Build simple SVL atom filter without chain key lookup.
+    """SVL filter for the nucleophile atom; rUID matches the PDB residue number.
 
-    Uses rUID for PDB residue numbering, searches all chains if chain empty.
+    Chain is ignored: MOE renames chains on PDB import (tag becomes the file name).
     """
-    # Build filter - rUID gets PDB auth_seq_id
-    # For covalent docking, select SG atom but reaction matcher needs whole residue context
     return f"(rUID aResidue protein_atoms == {resnum} and aName protein_atoms == '{atom_name}')"
-
-
-def _build_residue_filter(chain: str, resnum: int) -> str:
-    """Build SVL filter for whole residue (all atoms in residue)."""
-    return f"(rUID aResidue protein_atoms == {resnum})"
 
 
 def build_svl_script(
@@ -152,8 +145,6 @@ def build_svl_script(
     if length rxsite_atoms == 0 then
         exit 'Error: {covalent_residue} atom {atom_name} not found (rUID={resnum})';
     endif;
-
-    print ['Found nucleophile atom index:', rxsite_atoms(1), 'for {covalent_residue}'];
 
     opt.dockmode = 'Covalent';
     opt.placement = 'Covalent Docking';
