@@ -144,6 +144,11 @@ class JobRequest(BaseModel):
     moe_placement: str = "Triangle Matcher"
     moe_refinement: str = "Rigid Receptor"
     ph4_id: str | None = None  # MOE pharmacophore file ID from /api/pharmacophore/upload
+    # Covalent docking (MOE-only)
+    covalent_enabled: bool = False
+    covalent_reaction: str | None = None  # e.g., "michael_acceptor_s" (built-in template)
+    covalent_residue: str | None = None   # e.g., "A:CYS:189"
+    custom_rxn_id: str | None = None      # Custom .rxn file ID from /api/reactions/upload
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +219,7 @@ def status() -> dict:
         "default_num_modes": config.DEFAULT_NUM_MODES,
         "constraint_kinds": list(pharm.KINDS),
         "engines": list(docking.ENGINES),
+        "covalent_reactions": config.list_covalent_reactions(),
     }
 
 
@@ -262,6 +268,31 @@ async def upload_pharmacophore(file: UploadFile = File(...)) -> dict:
     return {"ph4_id": ph4_id, "filename": file.filename or "pharmacophore.ph4"}
 
 
+@app.post("/api/reactions/upload")
+async def upload_reaction(file: UploadFile = File(...)) -> dict:
+    """Upload a custom .rxn reaction file for covalent docking."""
+    raw = await file.read()
+    if len(raw) > 500_000:
+        raise HTTPException(413, "file too large")
+    try:
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        raise HTTPException(400, "cannot decode file as text")
+
+    # Basic validation: check for $RXN header (MDL RXN format)
+    if not text.strip().startswith("$RXN"):
+        raise HTTPException(400, "not a valid RXN file (missing $RXN header)")
+
+    # Store in runs/custom_reactions/
+    rxn_id = uuid.uuid4().hex[:12]
+    rxn_dir = config.JOB_DIR.parent / "custom_reactions"
+    rxn_dir.mkdir(exist_ok=True)
+    rxn_path = rxn_dir / f"{rxn_id}.rxn"
+    rxn_path.write_text(text)
+
+    return {"rxn_id": rxn_id, "filename": file.filename or "custom.rxn"}
+
+
 @app.post("/api/receptor/fetch")
 def fetch_receptor(req: FetchRequest) -> dict:
     pdb_id = req.pdb_id.strip()
@@ -281,6 +312,16 @@ def fetch_receptor(req: FetchRequest) -> dict:
 @app.get("/api/receptor/{receptor_id}/pdb")
 def receptor_pdb(receptor_id: str) -> Response:
     return PlainTextResponse(_receptor_path(receptor_id).read_text())
+
+
+@app.get("/api/receptor/{receptor_id}/residues/{resname}")
+def list_residues(receptor_id: str, resname: str) -> dict:
+    """List all residues of given type (e.g., CYS, SER) in receptor."""
+    if not re.fullmatch(r"[A-Z]{3}", resname.upper()):
+        raise HTTPException(400, "resname must be 3-letter code")
+    text = _receptor_path(receptor_id).read_text()
+    residues = prep.list_residues_by_name(text, resname.upper())
+    return {"resname": resname.upper(), "residues": residues}
 
 
 @app.get("/api/pdb_components/{comp_id}/smiles")
@@ -408,7 +449,40 @@ def create_job(req: JobRequest) -> dict:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    # Covalent docking validation
+    if req.covalent_enabled:
+        if req.engine != "moe":
+            raise HTTPException(400, "covalent docking requires MOE engine")
+        if not req.covalent_residue:
+            raise HTTPException(400, "covalent residue required (e.g., 'A:CYS:189')")
+        # Either built-in reaction or custom .rxn required
+        if not req.covalent_reaction and not req.custom_rxn_id:
+            raise HTTPException(400, "covalent reaction template or custom .rxn file required")
+        # Validate built-in reaction if specified
+        if req.covalent_reaction:
+            available_reactions = config.list_covalent_reactions()
+            if req.covalent_reaction not in available_reactions:
+                raise HTTPException(400, f"unknown reaction template {req.covalent_reaction}")
+        # Validate custom reaction file exists
+        if req.custom_rxn_id:
+            custom_rxn_path = config.RUNS_DIR / "custom_reactions" / f"{req.custom_rxn_id}.rxn"
+            if not custom_rxn_path.exists():
+                raise HTTPException(400, f"custom reaction file not found - re-upload")
+
     receptor_text = _receptor_path(req.receptor_id).read_text()
+
+    # Validate covalent residue exists in receptor
+    if req.covalent_enabled and req.covalent_residue:
+        if not prep.validate_residue_exists(receptor_text, req.covalent_residue):
+            # Extract resname to suggest available alternatives
+            parsed = prep.parse_residue_spec(req.covalent_residue)
+            suggestions = ""
+            if parsed:
+                _, resname, _ = parsed
+                available = prep.list_residues_by_name(receptor_text, resname)
+                if available:
+                    suggestions = f" - available {resname} residues: {', '.join(available[:10])}"
+            raise HTTPException(400, f"residue {req.covalent_residue} not found in receptor{suggestions}")
 
     reference_ligand_pdb = None
     if req.reference_ligand_key:
@@ -447,6 +521,10 @@ def create_job(req: JobRequest) -> dict:
         moe_placement=req.moe_placement,
         moe_refinement=req.moe_refinement,
         ph4_id=req.ph4_id,
+        covalent_enabled=req.covalent_enabled,
+        covalent_reaction=req.covalent_reaction,
+        covalent_residue=req.covalent_residue,
+        custom_rxn_id=req.custom_rxn_id,
     )
     job = MANAGER.submit(cleaned, f"receptor_{req.receptor_id}", specs, params)
     return job.as_dict()

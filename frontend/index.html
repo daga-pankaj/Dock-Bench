@@ -31,6 +31,16 @@
           <label class="filebtn">Upload .pdb<input type="file" id="pdbFile" accept=".pdb,.ent,.txt"></label>
           <span id="receptorInfo" class="muted">no receptor loaded</span>
         </div>
+        <div class="row">
+          <label style="flex: 0 0 200px;">Docking engine
+            <select id="engineSel">
+              <option value="smina">smina (CPU)</option>
+              <option value="gnina">gnina (CPU/GPU)</option>
+              <option value="moe">MOE</option>
+            </select>
+          </label>
+          <span id="engineInfo" class="muted small"></span>
+        </div>
         <div class="row checks">
           <label><input type="checkbox" id="removeLigand" checked> delete existing ligand(s) before docking</label>
           <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
@@ -114,6 +124,50 @@
       </div>
     </div>
 
+    <div class="card" id="covalentCard" style="display:none;">
+      <div class="row viewer-head">
+        <h2>3b · Covalent docking <span class="muted small">(MOE only)</span></h2>
+        <button id="toggleCovalentBtn" class="ghost mini" title="minimize this panel">_</button>
+      </div>
+      <div id="covalentBody">
+        <div class="row">
+          <label>
+            <input type="checkbox" id="covalentEnabled">
+            <strong>Enable covalent docking</strong>
+          </label>
+        </div>
+        <div id="covalentParams" style="display:none;">
+          <div class="grid2">
+            <label>warhead type
+              <select id="covalentReaction">
+                <option value="">Select reaction...</option>
+              </select>
+            </label>
+            <label>target residue
+              <div class="row" style="gap: 4px;">
+                <input type="text" id="covalentResidue" placeholder="A:CYS:189" style="flex: 1;">
+                <button id="pickCovalentAtomBtn" class="ghost mini" type="button" title="Click an atom in the viewer">👆 Pick</button>
+              </div>
+            </label>
+          </div>
+          <div class="row">
+            <input type="text" id="residueSearchInput" placeholder="CYS, SER, LYS..." maxlength="3" style="width: 80px; text-transform: uppercase;">
+            <button id="findResiduesBtn" class="ghost" type="button">Find in receptor</button>
+            <span id="residueInfo" class="muted small"></span>
+          </div>
+          <div id="residueList" class="residuelist"></div>
+          <div class="row">
+            <label class="filebtn">Upload custom .rxn (optional)<input type="file" id="customRxnFile" accept=".rxn"></label>
+            <span class="muted small" id="customRxnName"></span>
+          </div>
+          <p class="muted small">
+            Format: <code>chain:resname:resnum</code> (e.g., A:CYS:189, B:SER:25, :LYS:42)<br>
+            Draw custom reactions in <a href="https://lifescience.opensource.epam.com/ketcher/index.html" target="_blank">Ketcher</a>, export as .rxn, then upload.
+          </p>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="row viewer-head">
         <h2>4 · Ligands</h2>
@@ -139,13 +193,6 @@
         <label>energy range<input type="number" id="erange" value="4" step="0.5" min="0.5" max="20"></label>
         <label>seed<input type="number" id="seed" value="42"></label>
         <label>scoring<select id="scoring"></select></label>
-        <label>engine
-          <select id="engineSel">
-            <option value="smina">smina (CPU)</option>
-            <option value="gnina">gnina (CPU/GPU)</option>
-            <option value="moe">MOE</option>
-          </select>
-        </label>
       </div>
       <div class="row" id="sminaGninaParamsRow">
         <label class="inline" title="raises exhaustiveness/energy range to search the larger, floppier conformer space peptides and peptidomimetics need">
@@ -182,10 +229,6 @@
             <option value="None">None</option>
           </select>
         </label>
-      </div>
-      <div class="row" id="moePh4Row" style="display:none;">
-        <label class="filebtn">Upload .ph4 pharmacophore (optional)<input type="file" id="moePh4File" accept=".ph4"></label>
-        <span class="muted small" id="moePh4Name"></span>
       </div>
       <div class="row">
         <button id="runBtn" class="primary">Run</button>

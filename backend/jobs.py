@@ -82,6 +82,11 @@ class JobParams:
     moe_placement: str = "Triangle Matcher"
     moe_refinement: str = "Rigid Receptor"
     ph4_id: str | None = None  # MOE pharmacophore file ID
+    # Covalent docking (MOE-only)
+    covalent_enabled: bool = False
+    covalent_reaction: str | None = None  # e.g., "michael_acceptor_s" (built-in)
+    covalent_residue: str | None = None   # e.g., "A:CYS:189"
+    custom_rxn_id: str | None = None      # Custom .rxn file ID
 
 
 class Job:
@@ -142,6 +147,10 @@ class Job:
                 "moe_placement": self.params.moe_placement,
                 "moe_refinement": self.params.moe_refinement,
                 "ph4_id": self.params.ph4_id,
+                "covalent_enabled": self.params.covalent_enabled,
+                "covalent_reaction": self.params.covalent_reaction,
+                "covalent_residue": self.params.covalent_residue,
+                "custom_rxn_id": self.params.custom_rxn_id,
             },
             "n_ligands": len(self.ligands),
             "n_finished": done,
@@ -339,6 +348,10 @@ class JobManager:
                     "placement": job.params.moe_placement,
                     "refinement": job.params.moe_refinement,
                     "ph4_file": ph4_file,
+                    "covalent_enabled": job.params.covalent_enabled,
+                    "covalent_reaction": job.params.covalent_reaction,
+                    "covalent_residue": job.params.covalent_residue,
+                    "custom_rxn_id": job.params.custom_rxn_id,
                 })
             else:
                 dock_params.update({

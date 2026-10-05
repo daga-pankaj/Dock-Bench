@@ -70,6 +70,7 @@ const S = {
   excludeChains: new Set(), // chain IDs to delete from the receptor before docking (e.g. a peptide ligand)
   constraints: [],     // pharmacophore constraints: {id, kind, x, y, z, radius, required, label}
   pendingPickId: null, // constraint row currently waiting for a viewer click to set its point
+  covalentAtomPickActive: false, // waiting for user to click nucleophilic atom in viewer
   job: null,
   poll: null,
   selectedLigand: null,
@@ -83,6 +84,7 @@ const S = {
   receptorPanelHidden: false,     // "1 · Receptor" card minimized
   activeSitePanelHidden: false,   // "2 · Active site" card minimized
   pharmacophorePanelHidden: false, // "3 · Pharmacophore constraints" card minimized
+  covalentPanelHidden: false,      // "3b · Covalent docking" card minimized
   ligandsPanelHidden: false,       // "4 · Ligands" card minimized
   expandedResultRows: new Set(),   // ligand names whose per-pose score/strain breakdown is open
 };
@@ -565,6 +567,43 @@ function useHet(het) {
 function onAtomClick(atom) {
   if (!atom) return;
 
+  // Covalent atom picking mode - user selecting nucleophilic residue atom
+  if (S.covalentAtomPickActive) {
+    const nucleophileMap = {
+      'CYS': 'SG',
+      'SER': 'OG',
+      'THR': 'OG1',
+      'TYR': 'OH',
+      'LYS': 'NZ'
+    };
+
+    const resname = (atom.resn || "").toUpperCase();
+    const expectedAtom = nucleophileMap[resname];
+
+    // Validate nucleophilic residue type
+    if (!expectedAtom) {
+      toast(`⚠ ${resname} not a typical nucleophile. Supported: CYS, SER, THR, TYR, LYS`, true);
+      S.covalentAtomPickActive = false;
+      $("pickCovalentAtomBtn").classList.remove("armed");
+      return;
+    }
+
+    // Warn if wrong atom selected (but allow it)
+    if (atom.atom !== expectedAtom) {
+      toast(`⚠ Picked ${atom.atom}, but ${resname} nucleophile is typically ${expectedAtom}. Proceeding anyway.`, true);
+    }
+
+    // Fill residue field: chain:resname:resnum
+    const chain = atom.chain || "";
+    const spec = `${chain}:${resname}:${atom.resi}`;
+    $("covalentResidue").value = spec;
+
+    S.covalentAtomPickActive = false;
+    $("pickCovalentAtomBtn").classList.remove("armed");
+    toast(`✓ Covalent residue set: ${spec} (${atom.atom})`);
+    return;
+  }
+
   // A constraint row is waiting for its point - this click sets it, no
   // matter what the box-picking mode ("click ligand" / "pick atoms") is.
   if (S.pendingPickId != null) {
@@ -987,6 +1026,10 @@ async function runDocking() {
     moe_placement: $("moePlacement").value,
     moe_refinement: $("moeRefinement").value,
     ph4_id: S.ph4_id || null,
+    covalent_enabled: $("covalentEnabled").checked,
+    covalent_reaction: $("covalentReaction").value || null,
+    covalent_residue: $("covalentResidue").value.trim() || null,
+    custom_rxn_id: S.custom_rxn_id || null,
   };
 
   $("runBtn").disabled = true;
@@ -1420,6 +1463,7 @@ function wire() {
   panelToggle("toggleReceptorBtn", "receptorBody", "receptorPanelHidden");
   panelToggle("toggleActiveSiteBtn", "activeSiteBody", "activeSitePanelHidden");
   panelToggle("togglePharmacophoreBtn", "pharmacophoreBody", "pharmacophorePanelHidden");
+  panelToggle("toggleCovalentBtn", "covalentBody", "covalentPanelHidden");
   panelToggle("toggleLigandsBtn", "ligandsBody", "ligandsPanelHidden");
 
   $("cubeBtn").onclick = () => {
@@ -1452,6 +1496,79 @@ function wire() {
     }
   };
 
+  $("customRxnFile").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const data = await api("/api/reactions/upload", { method: "POST", body: fd });
+      S.custom_rxn_id = data.rxn_id;
+      $("customRxnName").textContent = data.filename;
+      // Add to dropdown as custom option
+      const sel = $("covalentReaction");
+      // Remove old custom option if exists
+      const oldCustom = sel.querySelector('option[data-custom="true"]');
+      if (oldCustom) oldCustom.remove();
+      const opt = document.createElement("option");
+      opt.value = "";  // Empty - custom_rxn_id used instead
+      opt.textContent = `Custom: ${data.filename}`;
+      opt.dataset.custom = "true";
+      sel.insertBefore(opt, sel.firstChild.nextSibling);
+      sel.value = "";
+      toast(`uploaded ${data.filename}`);
+    } catch (err) {
+      toast(err.message || "failed to upload .rxn file", true);
+    }
+  };
+
+  $("pickCovalentAtomBtn").onclick = () => {
+    S.covalentAtomPickActive = !S.covalentAtomPickActive;
+    $("pickCovalentAtomBtn").classList.toggle("armed", S.covalentAtomPickActive);
+    if (S.covalentAtomPickActive) {
+      toast("Click a nucleophilic atom (CYS SG, SER OG, LYS NZ, etc.) in the viewer");
+    } else {
+      toast("Atom picking cancelled");
+    }
+  };
+
+  $("findResiduesBtn").onclick = async () => {
+    if (!S.receptor) return toast("load receptor first", true);
+    const resname = $("residueSearchInput").value.trim().toUpperCase();
+    if (!resname || !/^[A-Z]{3}$/.test(resname)) {
+      return toast("enter 3-letter residue code (e.g., CYS, SER, LYS)", true);
+    }
+    const btn = $("findResiduesBtn");
+    btn.disabled = true;
+    try {
+      const data = await api(`/api/receptor/${S.receptor.id}/residues/${resname}`);
+      const residueList = $("residueList");
+      residueList.innerHTML = "";
+      if (!data.residues.length) {
+        $("residueInfo").textContent = `no ${resname} residues found`;
+        return;
+      }
+      $("residueInfo").textContent = `${data.residues.length} ${resname} residue(s) - click to use`;
+      data.residues.forEach((spec) => {
+        const div = document.createElement("div");
+        div.className = "residue-item";
+        div.textContent = spec;
+        div.onclick = () => {
+          $("covalentResidue").value = spec;
+          toast(`selected ${spec}`);
+        };
+        residueList.appendChild(div);
+      });
+    } catch (err) {
+      toast(err.message, true);
+    }
+    btn.disabled = false;
+  };
+
+  $("residueSearchInput").onkeydown = (e) => {
+    if (e.key === "Enter") $("findResiduesBtn").click();
+  };
+
   $("runBtn").onclick = runDocking;
   $("cancelBtn").onclick = async () => {
     if (!S.job) return;
@@ -1470,12 +1587,26 @@ function wire() {
     const isMoe = engine === "moe";
     const isGnina = engine === "gnina";
 
+    // Update engine info text
+    const engineInfoTexts = {
+      smina: "CPU-based Vina fork - good for general docking",
+      gnina: "CNN scoring + GPU support - better pose prediction",
+      moe: "Commercial engine - supports covalent docking, pharmacophore constraints"
+    };
+    $("engineInfo").textContent = engineInfoTexts[engine] || "";
+
     // Show/hide GPU row for gnina
     $("gpuRow").style.display = isGnina ? "flex" : "none";
 
     // Show/hide MOE-specific params
     $("moeParamsRow").style.display = isMoe ? "grid" : "none";
-    $("moePh4Row").style.display = "none";
+
+    // Show/hide covalent docking panel (MOE only)
+    $("covalentCard").style.display = isMoe ? "block" : "none";
+    if (!isMoe) {
+      $("covalentEnabled").checked = false;
+      $("covalentParams").style.display = "none";
+    }
 
     // Hide smina/gnina params for MOE
     $("sminaGninaParamsRow").style.display = isMoe ? "none" : "flex";
@@ -1487,6 +1618,11 @@ function wire() {
 
     // Update scoring dropdown based on engine
     updateScoringOptions(engine);
+  };
+
+  // Covalent checkbox toggles params
+  $("covalentEnabled").onchange = () => {
+    $("covalentParams").style.display = $("covalentEnabled").checked ? "block" : "none";
   };
 }
 
@@ -1538,6 +1674,21 @@ async function boot() {
     $("gpuInfo").textContent = st.gpu_available
       ? "NVIDIA GPU detected on this machine"
       : "no NVIDIA GPU detected - gnina will run on CPU";
+
+    // Populate covalent reactions dropdown
+    const covalentReactionSel = $("covalentReaction");
+    covalentReactionSel.innerHTML = '<option value="">Select reaction...</option>';
+    if (st.covalent_reactions && st.covalent_reactions.length > 0) {
+      st.covalent_reactions.forEach((rxn) => {
+        const opt = document.createElement("option");
+        opt.value = rxn;
+        opt.textContent = rxn.replace(/_/g, " ");
+        covalentReactionSel.appendChild(opt);
+      });
+    }
+
+    // Trigger initial engine UI update
+    $("engineSel").dispatchEvent(new Event("change"));
   } catch (err) {
     $("engine").className = "pill bad";
     $("engine").textContent = "backend unreachable";

@@ -113,6 +113,29 @@ def find_moebatch() -> str | None:
     return shutil.which("moebatch")
 
 
+def find_moe_reactions() -> Path | None:
+    """Locate MOE covalent reaction template directory."""
+    moebatch = find_moebatch()
+    if not moebatch:
+        return None
+
+    # moebatch at: /Applications/moe2024.0604/bin/moebatch
+    # reactions at: /Applications/moe2024.0604/lib/reactions/covalent
+    moe_root = Path(moebatch).parent.parent
+    rxn_dir = moe_root / "lib" / "reactions" / "covalent"
+
+    return rxn_dir if rxn_dir.is_dir() else None
+
+
+def list_covalent_reactions() -> list[str]:
+    """List available covalent reaction template names."""
+    rxn_dir = find_moe_reactions()
+    if not rxn_dir:
+        return []
+
+    return sorted([f.stem for f in rxn_dir.glob("*.rxn")])
+
+
 def subprocess_env(exe: str) -> dict[str, str]:
     """Environment for running a bundled tool (smina/gnina) as a subprocess.
 

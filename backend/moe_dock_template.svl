@@ -1,0 +1,47 @@
+#svl
+
+function Open;
+function Close;
+function Atoms;
+function Dock;
+function db_ExportSD;
+function ph4_aType;
+
+global function main []
+    local site_atoms, rec, lig, site, opt, all_atoms, distances, protein_atoms, ph4_data;
+
+    Open '{RECEPTOR_FILE}';
+
+    all_atoms = Atoms [];
+    protein_atoms = all_atoms | aResidue all_atoms <> '';
+
+    distances = sqrt add pow [sub [aPos protein_atoms, [{CENTER_X}, {CENTER_Y}, {CENTER_Z}]], 2];
+    site_atoms = protein_atoms | distances <= {SITE_RADIUS};
+
+    rec = [type: 'MOE', atom_sel: protein_atoms];
+    lig = [type: 'SD File', file: '{LIGAND_FILE}'];
+    site = site_atoms;
+
+    ph4_data = [];
+    if '{PH4_FILE}' <> '' then
+        ph4_data = ph4_aType '{PH4_FILE}';
+    endif;
+
+    opt = [
+        run_mode: 'run',
+        placement: '{PLACEMENT}',
+        rescoring: '{SCORING}',
+        refine: '{REFINEMENT}',
+        maxpose: {NUM_POSES},
+        remaxpose: {NUM_POSES},
+        ph4: ph4_data
+    ];
+
+{COVALENT_OPTIONS}
+
+    Dock [rec, site, lig, '{OUTPUT_MDB}', opt];
+
+    db_ExportSD ['{OUTPUT_MDB}', '{OUTPUT_SDF}'];
+
+    Close [];
+endfunction

@@ -361,6 +361,19 @@ def dock_with_moe(
     # MOE creates temp .mdb, SVL script exports to SDF and deletes MDB
     out_mdb = out_sdf.with_suffix(".mdb")
 
+    # Build covalent reaction file path if enabled
+    covalent_reaction_file = None
+    if kwargs.get('covalent_enabled'):
+        # Custom .rxn file takes precedence over built-in template
+        if kwargs.get('custom_rxn_id'):
+            custom_path = config.RUNS_DIR / "custom_reactions" / f"{kwargs['custom_rxn_id']}.rxn"
+            if custom_path.exists():
+                covalent_reaction_file = custom_path
+        elif kwargs.get('covalent_reaction'):
+            rxn_dir = config.find_moe_reactions()
+            if rxn_dir:
+                covalent_reaction_file = rxn_dir / f"{kwargs['covalent_reaction']}.rxn"
+
     moe_dock.dock(
         receptor=receptor,
         ligand=ligand_sdf,
@@ -376,6 +389,8 @@ def dock_with_moe(
         timeout=timeout,
         auto_detect_site=True,  # Use HETATM center with 10Å radius if found
         ph4_file=kwargs.get('ph4_file'),  # Allow direct .ph4 file upload
+        covalent_reaction_file=covalent_reaction_file,
+        covalent_residue=kwargs.get('covalent_residue'),
     )
 
     # Parse SDF with MOE scores (written as SD properties by SVL script)

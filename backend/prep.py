@@ -385,3 +385,81 @@ def build_3d(spec: LigandSpec, seed: int = 0xF00D) -> str:
         pass
     mol.SetProp("_Name", spec.name)
     return Chem.MolToMolBlock(mol)
+
+
+def parse_residue_spec(spec: str) -> tuple[str, str, int] | None:
+    """Parse 'chain:resname:resnum' or ':resname:resnum' format.
+
+    Returns:
+        (chain, resname, resnum) or None if invalid
+
+    Examples:
+        "A:CYS:189" → ("A", "CYS", 189)
+        ":SER:25"   → ("", "SER", 25)
+    """
+    match = re.match(r'^([A-Z]?):([A-Z]{3}):(\d+)$', spec.strip())
+    if not match:
+        return None
+
+    chain, resname, resnum_str = match.groups()
+    return (chain, resname, int(resnum_str))
+
+
+def validate_residue_exists(receptor_pdb_text: str, spec: str) -> bool:
+    """Check if specified residue exists in PDB text."""
+    parsed = parse_residue_spec(spec)
+    if not parsed:
+        return False
+
+    chain, resname, resnum = parsed
+
+    # Look for ATOM/HETATM lines matching the residue
+    # PDB format: columns 22 (chain), 18-20 (resname), 23-26 (resnum)
+    for line in receptor_pdb_text.splitlines():
+        if not (line.startswith("ATOM") or line.startswith("HETATM")):
+            continue
+        if len(line) < 27:
+            continue
+
+        line_chain = line[21:22].strip()
+        line_resname = line[17:20].strip()
+        try:
+            line_resnum = int(line[22:26].strip())
+        except ValueError:
+            continue
+
+        # Match chain (if specified), resname, and resnum
+        if (not chain or line_chain == chain) and line_resname == resname and line_resnum == resnum:
+            return True
+
+    return False
+
+
+def list_residues_by_name(receptor_pdb_text: str, resname: str) -> list[str]:
+    """List all occurrences of residue name in PDB text.
+
+    Returns list of specs like ["A:CYS:25", "A:CYS:51", "B:CYS:102"]
+    """
+    seen = set()
+    result = []
+
+    for line in receptor_pdb_text.splitlines():
+        if not (line.startswith("ATOM") or line.startswith("HETATM")):
+            continue
+        if len(line) < 27:
+            continue
+
+        line_chain = line[21:22].strip()
+        line_resname = line[17:20].strip()
+        try:
+            line_resnum = int(line[22:26].strip())
+        except ValueError:
+            continue
+
+        if line_resname == resname:
+            spec = f"{line_chain or '_'}:{resname}:{line_resnum}"
+            if spec not in seen:
+                seen.add(spec)
+                result.append(spec)
+
+    return sorted(result)

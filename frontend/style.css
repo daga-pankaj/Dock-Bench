@@ -85,8 +85,9 @@ main {
 .viewer-head { justify-content: space-between; margin: 0 0 8px; }
 .viewer-head h2 { margin: 0; }
 
+.grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 8px 0; }
 .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0; }
-.grid3 label, label.inline { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 3px; }
+.grid2 label, .grid3 label, label.inline { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 3px; }
 label.inline { flex-direction: row; align-items: center; gap: 6px; }
 
 input, select, textarea, button, .filebtn, .btnlink {
@@ -141,6 +142,17 @@ details summary { cursor: pointer; font-size: 12px; margin-bottom: 6px; }
 .chain-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .chain-row .n { color: var(--muted); margin-left: auto; }
 
+.residuelist { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; max-height: 110px; overflow: auto; }
+.residue-item {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card2);
+  cursor: pointer;
+}
+.residue-item:hover { border-color: var(--accent); background: var(--card); }
+
 .ligpreview { max-height: 150px; overflow: auto; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
 .ligpreview div { padding: 2px 0; border-bottom: 1px solid #1c232c; }
 .ligpreview .bad { color: var(--bad); }
@@ -155,6 +167,14 @@ details summary { cursor: pointer; font-size: 12px; margin-bottom: 6px; }
 .constraint-row input[type="text"] { flex: 1 1 90px; }
 .constraint-row label.inline { font-size: 11px; white-space: nowrap; }
 .constraint-row .c-pick.armed { background: var(--warn); color: #241c04; border-color: var(--warn); }
+
+/* Covalent atom picker button */
+#pickCovalentAtomBtn.armed {
+  background: var(--warn);
+  color: #241c04;
+  border-color: var(--warn);
+  font-weight: 600;
+}
 .constraint-row .c-remove { padding: 4px 8px; margin-left: auto; }
 .tag.unset { color: var(--warn); border-color: #5c4a1c; }
 
