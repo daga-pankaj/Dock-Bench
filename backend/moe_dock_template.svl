@@ -32,12 +32,17 @@ global function main []
         ph4_data = ph4_aType '{PH4_FILE}';
     endif;
 
+    // Same split as MOE's Dock panel defaults: placement poses are scored
+    // with London dG and the top {PLACEMENT_POSES} kept for refinement; the
+    // refined poses are then rescored with the user's scoring function and
+    // the best {NUM_POSES} written out.
     opt = [
         run_mode: 'run',
         placement: '{PLACEMENT}',
+        scoring: '{PLACEMENT_SCORING}',
         rescoring: '{SCORING}',
         refine: '{REFINEMENT}',
-        maxpose: {NUM_POSES},
+        maxpose: {PLACEMENT_POSES},
         remaxpose: {NUM_POSES},
         ph4: ph4_data
     ];

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from rdkit import Chem
 
-from . import config, docking, prep, rmsd, strain
+from . import config, covalent_check, docking, prep, rmsd, strain
 from . import pharmacophore as pharm
 
 
@@ -49,6 +49,14 @@ class LigandRun:
     # satisfying poses first); None when the job had no constraints.
     constraint_satisfied: bool | None = None
     constraint_detail: list[dict] = field(default_factory=list)
+    # MOE only, same order/index as scores: every score field MOE wrote per
+    # pose (docking.MOE_SCORE_FIELDS), and for covalent jobs the ligand
+    # environment each pose is bonded through ("*" = the residue atom).
+    pose_scores: list[dict] = field(default_factory=list)
+    covalent_attachments: list[str | None] = field(default_factory=list)
+    # Non-fatal problems worth surfacing next to the result (e.g. the ligand
+    # matching a covalent reaction zero or several times).
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def poses_file(self) -> str:
@@ -192,6 +200,11 @@ class Job:
             moe_placement=data["params"].get("moe_placement", "Triangle Matcher"),
             moe_refinement=data["params"].get("moe_refinement", "Rigid Receptor"),
             ph4_id=data["params"].get("ph4_id"),
+            minimize_after_docking=data["params"].get("minimize_after_docking", False),
+            covalent_enabled=data["params"].get("covalent_enabled", False),
+            covalent_reaction=data["params"].get("covalent_reaction"),
+            covalent_residue=data["params"].get("covalent_residue"),
+            custom_rxn_id=data["params"].get("custom_rxn_id"),
         )
         ligands = []
         for lig in data["ligands"]:
@@ -213,10 +226,30 @@ class Job:
                     constraint_satisfied=lig.get("constraint_satisfied"),
                     constraint_detail=lig.get("constraint_detail", []),
                     rmsd_to_reference=lig.get("rmsd_to_reference", []),
+                    strain_energies=lig.get("strain_energies", []),
+                    pose_scores=lig.get("pose_scores", []),
+                    covalent_attachments=lig.get("covalent_attachments", []),
+                    warnings=lig.get("warnings", []),
                 )
             )
         job = cls(data["id"], params, ligands, data["receptor"], created=data["created"])
         job.status = "cancelled" if data["status"] == "cancelled" else "done"
+        if params.engine == "moe":
+            # MOE jobs saved before per-pose scores were recorded: recover
+            # them from the poses SDF, which has always carried MOE's fields.
+            for lig in job.ligands:
+                sdf = job.poses_path(lig.name)
+                if lig.status != "done" or lig.pose_scores or not sdf.exists():
+                    continue
+                try:
+                    poses = docking._parse_moe_sdf(
+                        sdf, [pharm.Constraint.from_dict(c) for c in params.constraints] or None
+                    )
+                except Exception:
+                    continue
+                lig.pose_scores = [p.moe_scores for p in poses]
+                if params.covalent_enabled:
+                    lig.covalent_attachments = [p.covalent_attachment for p in poses]
         job.save()
         return job
 
@@ -314,6 +347,15 @@ class JobManager:
             lig_path = job.ligand_input(run.name)
             lig_path.write_text(molblock + "$$$$\n")
 
+            if job.params.engine == "moe" and job.params.covalent_enabled:
+                warning = covalent_check.reactant_warning(
+                    molblock,
+                    docking.covalent_rxn_path(job.params.covalent_reaction, job.params.custom_rxn_id),
+                )
+                if warning:
+                    with job.lock:
+                        run.warnings.append(warning)
+
             # A job with fewer ligands than worker slots would otherwise leave
             # most cores idle - a 1-ligand job used to run smina pinned to a
             # single core even on a 9-worker box. Spread MAX_WORKERS cores
@@ -394,6 +436,10 @@ class JobManager:
             run.best_score = min(scores) if scores else None
             run.constraint_satisfied = poses[0].constraint_satisfied
             run.constraint_detail = poses[0].constraint_detail
+            if job.params.engine == "moe":
+                run.pose_scores = [p.moe_scores for p in poses]
+                if job.params.covalent_enabled:
+                    run.covalent_attachments = [p.covalent_attachment for p in poses]
 
             try:
                 pose_mols = [

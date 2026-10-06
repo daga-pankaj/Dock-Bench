@@ -34,8 +34,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from rdkit import Chem
 
-from . import config, docking, prep
+from . import config, covalent_check, docking, prep
 from . import interaction_render
 from . import interactions_prolif as iprolif
 from . import pharmacophore as pharm
@@ -325,12 +326,18 @@ def list_residues(receptor_id: str, resname: str) -> dict:
 
 
 @app.get("/api/pdb_components/{comp_id}/smiles")
-def pdb_component_smiles(comp_id: str) -> dict:
+def pdb_component_smiles(comp_id: str, receptor_id: str | None = None, het_key: str | None = None) -> dict:
     """A bound ligand's own PDB Chemical Component Dictionary SMILES, for the
     "self-dock" button - lets a HETATM group's residue code (e.g. STI) become
     a ready-to-dock ligand without needing its bond orders/aromaticity
     guessed back from bare coordinates (unreliable - see backend/rmsd.py's
-    module docstring for how RMSD validation sidesteps that problem)."""
+    module docstring for how RMSD validation sidesteps that problem).
+
+    Given the receptor and the bound group's key, a group LINKed to the
+    protein as an acyl adduct comes back in its pre-reaction (carboxylic
+    acid) form instead, since the CCD stores the cut adduct - see
+    covalent_check.acid_form_from_link. `covalent_note` says when that
+    happened."""
     comp_id = comp_id.strip().upper()
     if not COMP_ID_RE.match(comp_id):
         raise HTTPException(400, "bad chemical component id")
@@ -349,7 +356,14 @@ def pdb_component_smiles(comp_id: str) -> dict:
         smiles = next((d["descriptor"] for d in descriptors if d.get("type") == "SMILES"), None)
     if smiles is None:
         raise HTTPException(404, f"RCSB has no SMILES on file for {comp_id}")
-    return {"comp_id": comp_id, "smiles": smiles, "name": data.get("chem_comp", {}).get("name", comp_id)}
+    out = {"comp_id": comp_id, "smiles": smiles, "name": data.get("chem_comp", {}).get("name", comp_id)}
+    if receptor_id and het_key:
+        acid = covalent_check.acid_form_from_link(_receptor_path(receptor_id).read_text(), het_key, smiles)
+        if acid:
+            out.update(smiles=acid, ccd_smiles=smiles,
+                       covalent_note=f"{comp_id} is LINKed to the protein as an acyl adduct - "
+                                     "rebuilt as the carboxylic acid it reacts from")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +594,33 @@ def ligand_log(job_id: str, name: str) -> Response:
     return PlainTextResponse(path.read_text())
 
 
+@app.get("/api/jobs/{job_id}/ligands/{name}/depiction.svg")
+def ligand_depiction(job_id: str, name: str) -> Response:
+    """Plain 2D structure of a docked ligand, for the viewer's corner overlay.
+    Drawn from the submitted SMILES when there is one (cleaner bond orders
+    than a docking engine's SDF), else from the top pose."""
+    job = MANAGER.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    name = _safe_name(name)
+    lig = next((l for l in job.ligands if l.name == name), None)
+    if lig is None:
+        raise HTTPException(404, "ligand not found")
+
+    mol = Chem.MolFromSmiles(lig.smiles) if lig.smiles else None
+    if mol is None:
+        poses_path = job.poses_path(name)
+        if poses_path.exists():
+            mol = next(iter(Chem.SDMolSupplier(str(poses_path), removeHs=False)), None)
+    if mol is None:
+        raise HTTPException(404, "no structure to depict")
+    try:
+        svg = interaction_render.render_depiction_svg(mol)
+    except Exception as exc:
+        raise HTTPException(500, f"depiction failed: {exc}") from exc
+    return Response(svg, media_type="image/svg+xml")
+
+
 @app.get("/api/jobs/{job_id}/ligands/{name}/poses/{pose_index}/interactions2d.svg")
 def ligand_interactions_2d(job_id: str, name: str, pose_index: int) -> Response:
     """A flattened 2D interaction diagram (ProLIF detection + our own LigPlot-
@@ -619,7 +660,7 @@ def _results_csv(job) -> str:
     writer.writerow(
         ["name", "smiles", "status", "best_affinity_kcal_per_mol", "n_poses",
          "all_scores", "all_strain_energies_kcal_per_mol", "all_rmsd_to_reference_angstrom",
-         "constraints_satisfied", "error"]
+         "constraints_satisfied", "moe_pose_scores", "covalent_attachments", "warnings", "error"]
     )
     for lig in job.ligands:
         writer.writerow(
@@ -633,6 +674,10 @@ def _results_csv(job) -> str:
                 ";".join("" if e is None else f"{e:.2f}" for e in lig.strain_energies),
                 ";".join("" if r is None else f"{r:.2f}" for r in lig.rmsd_to_reference),
                 "" if lig.constraint_satisfied is None else str(lig.constraint_satisfied),
+                # one "field=value,..." group per pose, poses separated by ";"
+                ";".join(",".join(f"{k}={v:.3f}" for k, v in ps.items()) for ps in lig.pose_scores),
+                ";".join(a or "" for a in lig.covalent_attachments),
+                " | ".join(lig.warnings),
                 lig.error or "",
             ]
         )

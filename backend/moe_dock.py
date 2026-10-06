@@ -101,6 +101,13 @@ def _build_simple_atom_filter(chain: str, resnum: int, atom_name: str) -> str:
     return f"(rUID aResidue protein_atoms == {resnum} and aName protein_atoms == '{atom_name}')"
 
 
+# MOE's Dock panel defaults: placement scored with London dG, 30 placement
+# poses carried into refinement, refined poses rescored with GBVI/WSA dG.
+PLACEMENT_SCORING = "London dG"
+PLACEMENT_POSES = 30
+DEFAULT_RESCORING = "GBVI/WSA dG"
+
+
 def build_svl_script(
     receptor: Path,
     ligand: Path,
@@ -109,7 +116,7 @@ def build_svl_script(
     center: Tuple[float, float, float],
     size: Tuple[float, float, float],
     num_poses: int = 5,
-    scoring: str = "London dG",
+    scoring: str = DEFAULT_RESCORING,
     placement: str = "Triangle Matcher",
     refinement: str = "Rigid Receptor",
     ph4_file: Optional[Path] = None,
@@ -186,6 +193,8 @@ def build_svl_script(
         CENTER_Z=center[2],
         SITE_RADIUS=site_radius,
         NUM_POSES=num_poses,
+        PLACEMENT_POSES=max(PLACEMENT_POSES, num_poses),
+        PLACEMENT_SCORING=PLACEMENT_SCORING,
         SCORING=scoring,
         PLACEMENT=placement,
         REFINEMENT=refinement,
@@ -204,7 +213,7 @@ def dock(
     center: Tuple[float, float, float],
     size: Tuple[float, float, float],
     num_poses: int = 5,
-    scoring: str = "London dG",
+    scoring: str = DEFAULT_RESCORING,
     placement: str = "Triangle Matcher",
     refinement: str = "Rigid Receptor",
     log_path: Optional[Path] = None,
@@ -224,7 +233,8 @@ def dock(
         center: Box center (x, y, z)
         size: Box size (x, y, z)
         num_poses: Number of poses to generate
-        scoring: Scoring function (London dG, GBVI/WSA dG, Affinity dG, ASE)
+        scoring: Rescoring function applied after refinement (GBVI/WSA dG,
+            London dG, Affinity dG, ASE); placement always uses London dG
         placement: Placement method (Triangle Matcher, Alpha PMI, Pharmacophore)
         refinement: Refinement (None, Rigid Receptor, Induced Fit, Rigid Body)
         log_path: Optional log file path
@@ -353,7 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--size_y", type=float, required=True)
     parser.add_argument("--size_z", type=float, required=True)
     parser.add_argument("--num_poses", type=int, default=5)
-    parser.add_argument("--scoring", default="London dG",
+    parser.add_argument("--scoring", default=DEFAULT_RESCORING,
                        choices=["London dG", "GBVI/WSA dG", "Affinity dG", "ASE", "Alpha HB"])
     parser.add_argument("--placement", default="Triangle Matcher",
                        choices=["Triangle Matcher", "Alpha PMI", "Pharmacophore",

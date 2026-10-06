@@ -56,6 +56,27 @@ def render_placeholder_svg(message: str) -> str:
     )
 
 
+def render_depiction_svg(mol: Chem.Mol, size: int = 220) -> str:
+    """Plain 2D structure on a transparent background, light-on-dark so it
+    reads over the black 3D viewer."""
+    try:
+        depict_mol = Chem.RemoveHs(mol)
+    except Exception:  # unsanitizable pose: draw as-is rather than not at all
+        depict_mol = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+    depict_mol.RemoveAllConformers()
+    AllChem.Compute2DCoords(depict_mol)
+    drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
+    opts = drawer.drawOptions()
+    rdMolDraw2D.SetDarkMode(opts)
+    opts.clearBackground = False
+    opts.padding = 0.08
+    opts.bondLineWidth = 2
+    opts.minFontSize = 14
+    drawer.DrawMolecule(depict_mol)
+    drawer.FinishDrawing()
+    return drawer.GetDrawingText()
+
+
 def _ligand_svg_inner(svg_text: str) -> str:
     match = _SVG_INNER_RE.search(svg_text)
     return match.group(1) if match else svg_text

@@ -2,20 +2,34 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rdkit import Chem, RDLogger
 
-from . import config
+from . import config, covalent_check
 from . import pharmacophore as pharm
 
 RDLogger.DisableLog("rdApp.*")
 
 SCORING_FUNCTIONS = ("vina", "vinardo", "dkoes_scoring", "ad4_scoring")
-# MOE scoring: London dG, GBVI/WSA dG, Affinity dG, ASE, Alpha HB
-MOE_SCORING_FUNCTIONS = ("London dG", "GBVI/WSA dG", "Affinity dG", "ASE", "Alpha HB")
+# MOE rescoring functions (placement is always London dG, see moe_dock);
+# first entry is the default, matching MOE's own Dock panel.
+MOE_SCORING_FUNCTIONS = ("GBVI/WSA dG", "London dG", "Affinity dG", "ASE", "Alpha HB")
+
+# SD fields MOE's Dock writes per pose, in pipeline order, with what each
+# means. S is the final score (the rescoring function after refinement).
+MOE_SCORE_FIELDS = {
+    "S": "final score (rescoring function)",
+    "E_place": "placement score",
+    "E_score1": "London dG after placement",
+    "E_refine": "refinement energy",
+    "E_score2": "rescoring function after refinement",
+    "E_conf": "ligand conformer energy",
+    "rmsd_refine": "RMSD moved during refinement (Å)",
+}
 ENGINES = ("smina", "gnina", "moe")
 
 
@@ -58,6 +72,11 @@ class Pose:
     # through any re-sort so minimize()'s reorder pass (see
     # _rewrite_in_rank_order) can find its way back to the original block.
     orig_index: int = -1
+    # MOE only: every MOE_SCORE_FIELDS value MOE wrote for this pose, and for
+    # covalent poses the ligand environment of the bonded atom (see
+    # covalent_check.pose_attachment).
+    moe_scores: dict[str, float] = field(default_factory=dict)
+    covalent_attachment: str | None = None
 
 
 def _find_engine(engine: str) -> str:
@@ -344,7 +363,7 @@ def dock_with_moe(
     size: tuple[float, float, float],
     log_path: Path | None = None,
     num_modes: int = config.DEFAULT_NUM_MODES,
-    scoring: str = "London dG",
+    scoring: str = MOE_SCORING_FUNCTIONS[0],
     placement: str = "Triangle Matcher",
     refinement: str = "Rigid Receptor",
     timeout: int = 3600,
@@ -361,18 +380,9 @@ def dock_with_moe(
     # MOE creates temp .mdb, SVL script exports to SDF and deletes MDB
     out_mdb = out_sdf.with_suffix(".mdb")
 
-    # Build covalent reaction file path if enabled
     covalent_reaction_file = None
     if kwargs.get('covalent_enabled'):
-        # Custom .rxn file takes precedence over built-in template
-        if kwargs.get('custom_rxn_id'):
-            custom_path = config.RUNS_DIR / "custom_reactions" / f"{kwargs['custom_rxn_id']}.rxn"
-            if custom_path.exists():
-                covalent_reaction_file = custom_path
-        elif kwargs.get('covalent_reaction'):
-            rxn_dir = config.find_moe_reactions()
-            if rxn_dir:
-                covalent_reaction_file = rxn_dir / f"{kwargs['covalent_reaction']}.rxn"
+        covalent_reaction_file = covalent_rxn_path(kwargs.get('covalent_reaction'), kwargs.get('custom_rxn_id'))
 
     moe_dock.dock(
         receptor=receptor,
@@ -398,6 +408,19 @@ def dock_with_moe(
     if not poses:
         raise MoeDockingFailed("MOE produced no poses")
     return poses
+
+
+def covalent_rxn_path(covalent_reaction: str | None, custom_rxn_id: str | None) -> Path | None:
+    """The .rxn file a covalent MOE job uses: an uploaded custom file takes
+    precedence over a built-in template. None if neither resolves."""
+    if custom_rxn_id:
+        custom_path = config.RUNS_DIR / "custom_reactions" / f"{custom_rxn_id}.rxn"
+        return custom_path if custom_path.exists() else None
+    if covalent_reaction:
+        rxn_dir = config.find_moe_reactions()
+        if rxn_dir:
+            return rxn_dir / f"{covalent_reaction}.rxn"
+    return None
 
 
 def _parse_moe_sdf(sdf_path: Path, constraints: list[pharm.Constraint] | None = None) -> list[Pose]:
@@ -431,6 +454,9 @@ def _parse_moe_sdf(sdf_path: Path, constraints: list[pharm.Constraint] | None = 
             rmsd_lb=rmsd,
             rmsd_ub=rmsd,
             orig_index=i - 1,
+            # MOE writes inf for a failed refinement; JSON can't carry it
+            moe_scores={k: v for k in MOE_SCORE_FIELDS if (v := prop(k)) is not None and math.isfinite(v)},
+            covalent_attachment=covalent_check.pose_attachment(mol),
         )
 
         pen = 0.0

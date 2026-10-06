@@ -77,10 +77,12 @@ const S = {
   selectedLigandObj: null, // the ligand row object last passed to showPoses()
   poseReps: [],        // Mol* representation refs, one per pose currently shown
   activePose: 0,
+  posePlayTimer: null,   // setInterval handle while the pose bar's play button is cycling poses
   hideOrigLigand: false, // hide co-crystallized ligand from the complex
   hideProtein: false,    // hide the receptor's polymer cartoon from the complex
   diagramHidden: false,   // 2D interaction diagram panel toggled off
   diagramUrl: null,        // current object URL behind #diagramImg, revoked on change
+  depictionUrl: null,      // object URL behind the viewer's 2D ligand overlay
   receptorPanelHidden: false,     // "1 · Receptor" card minimized
   activeSitePanelHidden: false,   // "2 · Active site" card minimized
   pharmacophorePanelHidden: false, // "3 · Pharmacophore constraints" card minimized
@@ -163,6 +165,11 @@ async function initViewer() {
     settings: {
       renderer: { ...plugin.canvas3d.props.renderer, backgroundColor: Color(0x000000) },
     },
+  });
+
+  await plugin.managers.structure.component.setOptions({
+    ...plugin.managers.structure.component.state.options,
+    hydrogens: "only-polar",
   });
 
   plugin.behaviors.interaction.click.subscribe(onPluginClick);
@@ -290,8 +297,16 @@ function zoomToExpression(expr, durationMs = 300) {
   }
 }
 
+// Raw addRepresentation ignores the viewer's "Hydrogens" option (only presets
+// apply it), so mirror it here for the built-in representation types.
+function hydrogenTypeParams() {
+  const h = plugin.managers.structure.component.state.options.hydrogens;
+  return { ignoreHydrogens: h !== "all", ignoreHydrogensVariant: h === "only-polar" ? "non-polar" : "all" };
+}
+
 async function addRep(componentRef, type, color, colorParams, typeParams) {
   if (!componentRef) return null;
+  if (typeof type === "string") typeParams = { ...hydrogenTypeParams(), ...typeParams };
   return plugin.builders.structure.representation.addRepresentation(componentRef, {
     type, color, colorParams, typeParams,
   });
@@ -967,8 +982,11 @@ async function selfDockFromBoundLigand() {
   const btn = $("selfDockBtn");
   btn.disabled = true;
   try {
-    const { smiles, name } = await api(`/api/pdb_components/${encodeURIComponent(S.activeHet.resname)}/smiles`);
+    const q = new URLSearchParams({ receptor_id: S.receptor.id, het_key: S.activeHet.key });
+    const { smiles, name, covalent_note } = await api(
+      `/api/pdb_components/${encodeURIComponent(S.activeHet.resname)}/smiles?${q}`);
     await loadSelfDockLigand(smiles, name);
+    if (covalent_note) toast(covalent_note);
   } catch (err) {
     toast(err.message, true);
   }
@@ -1102,6 +1120,43 @@ function constraintBadge(lig) {
 }
 
 
+const escapeHtml = (text) => String(text).replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+// MOE's per-pose SD fields, in pipeline order (mirrors docking.MOE_SCORE_FIELDS).
+const MOE_SCORE_COLUMNS = [
+  ["S", "final score (rescoring function)"],
+  ["E_place", "placement score"],
+  ["E_score1", "London dG after placement"],
+  ["E_refine", "refinement energy"],
+  ["E_score2", "rescoring function after refinement"],
+  ["E_conf", "ligand conformer energy"],
+  ["rmsd_refine", "RMSD moved during refinement (Å)"],
+];
+
+// Per-pose table for a MOE result: every MOE score, plus strain, RMSD to the
+// bound ligand and (covalent) the group each pose is bonded through.
+function moePoseTable(lig) {
+  const fmt = (v, d = 2) => (v === null || v === undefined ? "" : v.toFixed(d));
+  const hasStrain = (lig.strain_energies || []).some((v) => v !== null && v !== undefined);
+  const hasRmsd = (lig.rmsd_to_reference || []).some((v) => v !== null && v !== undefined);
+  const hasAttach = (lig.covalent_attachments || []).some(Boolean);
+  const head = ["<th>pose</th>",
+    ...MOE_SCORE_COLUMNS.map(([k, help]) => `<th title="${help}">${k}</th>`),
+    hasStrain ? '<th title="ligand-only MMFF strain (kcal/mol)">strain</th>' : "",
+    hasRmsd ? '<th title="RMSD to the bound ligand (Å)">RMSD</th>' : "",
+    hasAttach ? '<th title="ligand atoms around the bond to the residue (* = residue atom)">bonded via</th>' : "",
+  ].join("");
+  const body = lig.pose_scores.map((ps, i) => `<tr>
+      <td>#${i + 1}</td>
+      ${MOE_SCORE_COLUMNS.map(([k]) => `<td>${fmt(ps[k])}</td>`).join("")}
+      ${hasStrain ? `<td>${fmt(lig.strain_energies[i], 1)}</td>` : ""}
+      ${hasRmsd ? `<td>${fmt(lig.rmsd_to_reference[i])}</td>` : ""}
+      ${hasAttach ? `<td class="mono">${escapeHtml(lig.covalent_attachments[i] || "")}</td>` : ""}
+    </tr>`).join("");
+  return `<table class="moescores"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
 function renderJob(job) {
   const pct = job.n_ligands ? (100 * job.n_finished) / job.n_ligands : 0;
   $("bar").style.width = `${pct}%`;
@@ -1121,7 +1176,9 @@ function renderJob(job) {
     const tr = document.createElement("tr");
     if (lig.name === S.selectedLigand) tr.className = "sel";
     const score = lig.best_score === null ? "-" : lig.best_score.toFixed(2);
-    const hasBreakdown = lig.scores && lig.scores.length > 1;
+    const isMoe = lig.pose_scores && lig.pose_scores.length > 0;
+    const warnings = lig.warnings || [];
+    const hasBreakdown = (lig.scores && lig.scores.length > 1) || isMoe || warnings.length > 0;
     const expanded = S.expandedResultRows.has(lig.name);
     // rmsd_to_reference[0] is the top-ranked pose's RMSD to the receptor's
     // own bound-ligand position (backend/rmsd.py) - only present for a
@@ -1131,8 +1188,8 @@ function renderJob(job) {
       `<span class="tag ${topRmsd <= 2.0 ? "done" : "unset"}">${topRmsd.toFixed(2)}</span>`;
     tr.innerHTML = `
       <td title="${lig.smiles || ""}">${lig.name}</td>
-      <td><span class="tag ${lig.status}">${lig.status}</span></td>
-      <td class="score">${score}${hasBreakdown ? ` <button class="ghost mini posetoggle" title="show every pose's score/strain">${expanded ? "▴" : "▾"}</button>` : ""}</td>
+      <td><span class="tag ${lig.status}">${lig.status}</span>${warnings.length ? ` <span class="tag unset" title="${escapeHtml(warnings.join("\n"))}">⚠</span>` : ""}</td>
+      <td class="score">${score}${hasBreakdown ? ` <button class="ghost mini posetoggle" title="${isMoe ? "show every pose's MOE scores" : "show every pose's score/strain"}">${expanded ? "▴" : "▾"}</button>` : ""}</td>
       <td>${lig.n_poses || ""}</td>
       <td>${constraintBadge(lig)}</td>
       <td>${rmsdText}</td>
@@ -1167,14 +1224,15 @@ function renderJob(job) {
     if (hasBreakdown && expanded) {
       const detailTr = document.createElement("tr");
       detailTr.className = "posedetail";
-      const cells = lig.scores.map((s, i) => {
+      const warnHtml = warnings.map((w) => `<div class="warnline">⚠ ${escapeHtml(w)}</div>`).join("");
+      const cells = isMoe ? moePoseTable(lig) : lig.scores.map((s, i) => {
         const strain = lig.strain_energies && lig.strain_energies[i];
         const strainText = strain === null || strain === undefined ? "" : ` <span class="muted">strain ${strain.toFixed(1)}</span>`;
         const r = lig.rmsd_to_reference && lig.rmsd_to_reference[i];
         const rmsdText = r === null || r === undefined ? "" : ` <span class="muted">rmsd ${r.toFixed(2)} Å</span>`;
         return `<span class="posecell">#${i + 1} ${s.toFixed(2)} kcal/mol${strainText}${rmsdText}</span>`;
       }).join("");
-      detailTr.innerHTML = `<td colspan="7">${cells}</td>`;
+      detailTr.innerHTML = `<td colspan="7">${warnHtml}${cells}</td>`;
       tbody.appendChild(detailTr);
     }
   });
@@ -1185,6 +1243,7 @@ function renderJob(job) {
 // ---------------------------------------------------------------------------
 
 async function clearPoses() {
+  stopPosePlayback(false);
   await deleteRefs(interactionRefs);
   interactionRefs = [];
   await deleteRefs(poseStructureRefs);
@@ -1192,6 +1251,7 @@ async function clearPoses() {
   poseStructures = [];
   S.poseReps = [];
   $("poseBar").classList.add("hidden");
+  hideLigandDepiction();
   if (S.diagramUrl) { URL.revokeObjectURL(S.diagramUrl); S.diagramUrl = null; }
   $("diagramImg").classList.add("hidden");
   $("diagramEmpty").textContent = "select a pose to see its interaction diagram";
@@ -1222,29 +1282,45 @@ async function showPoses(lig) {
 
     const bar = $("poseBar");
     bar.innerHTML = `<span class="title">${lig.name} - poses:</span>`;
+    const stepBtn = (text, title, onclick, id) => {
+      const b = document.createElement("button");
+      if (id) b.id = id;
+      b.className = "pose-play";
+      b.textContent = text;
+      b.title = title;
+      b.onclick = onclick;
+      bar.appendChild(b);
+    };
+    stepBtn("\u23EE", "previous pose", () => { stopPosePlayback(false); stepPose(-1); });
+    stepBtn("\u25B6", "play through the docked poses", togglePosePlayback, "posePlayBtn");
+    stepBtn("\u23ED", "next pose", () => { stopPosePlayback(false); stepPose(1); });
     S.poseReps.forEach((_, i) => {
       const b = document.createElement("button");
       const score = lig.scores[i];
       b.className = "pose";
       b.textContent = `${i + 1}${score !== undefined ? `  ${score.toFixed(2)}` : ""}`;
-      b.onclick = () => selectPose(i);
+      b.onclick = () => { stopPosePlayback(false); selectPose(i); };
       bar.appendChild(b);
     });
     const all = document.createElement("button");
     all.className = "pose";
     all.textContent = "all";
-    all.onclick = () => selectPose(-1);
+    all.onclick = () => { stopPosePlayback(false); selectPose(-1); };
     bar.appendChild(all);
     bar.classList.remove("hidden");
 
     selectPose(0);
+    showLigandDepiction(lig);
     renderJob(S.job);
   } catch (err) {
     toast(err.message, true);
   }
 }
 
-function selectPose(idx) {
+// `light` skips the per-pose contacts + 2D diagram (both hit the backend /
+// rebuild structures) so playback can step quickly; they're refreshed once
+// playback stops.
+function selectPose(idx, { light = false } = {}) {
   S.activePose = idx;
   S.poseReps.forEach((rep, i) => {
     if (!rep) return;
@@ -1253,9 +1329,86 @@ function selectPose(idx) {
   document.querySelectorAll("#poseBar .pose").forEach((b, i) => {
     b.classList.toggle("active", i === (idx === -1 ? S.poseReps.length : idx));
   });
+  if (light) return;
   // "all" (idx -1) has no single pose to show contacts for; a specific pose does.
   showInteractions(idx).catch((err) => console.warn("interactions failed", err));
   showInteractionDiagram(idx).catch((err) => console.warn("2d diagram failed", err));
+}
+
+// Moves the active pose by `delta`, wrapping; from "all" it lands on the
+// first (forward) or last (back) pose.
+function stepPose(delta, opts) {
+  const n = S.poseReps.length;
+  if (!n) return;
+  const next = S.activePose < 0 ? (delta > 0 ? 0 : n - 1) : (S.activePose + delta + n) % n;
+  selectPose(next, opts);
+}
+
+const POSE_PLAY_INTERVAL_MS = 1200;
+
+function togglePosePlayback() {
+  if (S.posePlayTimer) { stopPosePlayback(true); return; }
+  const n = S.poseReps.length;
+  if (n < 2) return;
+  const step = () => stepPose(1, { light: true });
+  step();
+  S.posePlayTimer = setInterval(step, POSE_PLAY_INTERVAL_MS);
+  const btn = $("posePlayBtn");
+  if (btn) { btn.textContent = "\u275A\u275A"; btn.title = "pause"; btn.classList.add("active"); }
+}
+
+// `refresh` re-selects the pose playback stopped on so its contacts and 2D
+// diagram (skipped while cycling) get drawn.
+function stopPosePlayback(refresh) {
+  if (!S.posePlayTimer) return;
+  clearInterval(S.posePlayTimer);
+  S.posePlayTimer = null;
+  const btn = $("posePlayBtn");
+  if (btn) { btn.textContent = "\u25B6"; btn.title = "play through the docked poses"; btn.classList.remove("active"); }
+  if (refresh) selectPose(S.activePose);
+}
+
+// Small 2D structure of the docked ligand pinned to the top-left of Mol*'s 3D
+// canvas. Mounted inside .msp-viewport (not #viewer, which also holds Mol*'s
+// side panels) and re-attached each time, since Mol* can remount the
+// viewport on layout changes. Same <img>-not-innerHTML reasoning as the
+// interaction diagram below.
+function ligandDepictionEl() {
+  let el = $("ligandDepiction");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "ligandDepiction";
+    el.className = "hidden";
+    el.innerHTML = '<div class="depname"></div><img alt="2D structure of the docked ligand">';
+  }
+  const viewport = $("viewer").querySelector(".msp-viewport") || $("viewer");
+  if (el.parentElement !== viewport) viewport.appendChild(el);
+  return el;
+}
+
+async function showLigandDepiction(lig) {
+  const el = ligandDepictionEl();
+  const img = el.querySelector("img");
+  try {
+    const res = await fetch(`/api/jobs/${S.job.id}/ligands/${encodeURIComponent(lig.name)}/depiction.svg`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    if (S.selectedLigand !== lig.name) return; // another ligand was picked meanwhile
+    if (S.depictionUrl) URL.revokeObjectURL(S.depictionUrl);
+    S.depictionUrl = URL.createObjectURL(blob);
+    img.src = S.depictionUrl;
+    el.querySelector(".depname").textContent = lig.name;
+    el.classList.remove("hidden");
+  } catch (err) {
+    console.warn("2d depiction failed", err);
+    hideLigandDepiction();
+  }
+}
+
+function hideLigandDepiction() {
+  const el = $("ligandDepiction");
+  if (el) el.classList.add("hidden");
+  if (S.depictionUrl) { URL.revokeObjectURL(S.depictionUrl); S.depictionUrl = null; }
 }
 
 // Fetches the backend's ProLIF-detected, LigPlot-style 2D diagram for one pose
@@ -1305,7 +1458,21 @@ async function showInteractions(idx) {
   interactionRefs = [];
   if (idx < 0 || !receptorStructure || !poseStructures[idx]) return;
   try {
-    const structures = [{ ref: receptorStructure.ref }, { ref: poseStructures[idx].ref }];
+    // With "hide ligand" on, merge in a ligand/ion-free copy of the receptor
+    // instead: otherwise the co-crystallised ligand (which usually overlaps
+    // the pose) comes back through the merged structure - drawn as a
+    // "contact residue" and picked up by the interaction lines.
+    let receptorSrc = receptorStructure;
+    if (S.hideOrigLigand) {
+      const strippedExpr = MS.struct.modifier.exceptBy({
+        0: MS.struct.generator.all(),
+        by: MS.struct.combinator.merge([Queries.ligand.expression, Queries.ion.expression]),
+      });
+      const stripped = await plugin.builders.structure.tryCreateComponentFromExpression(
+        receptorStructure, strippedExpr, "receptor-no-ligand");
+      if (stripped) { interactionRefs.push(stripped); receptorSrc = stripped; }
+    }
+    const structures = [{ ref: receptorSrc.ref }, { ref: poseStructures[idx].ref }];
     const merged = await plugin.state.data.build().toRoot()
       .apply(MergeStructures, { structures }, { dependsOn: structures.map((s) => s.ref) })
       .commit();
@@ -1332,7 +1499,7 @@ async function showInteractions(idx) {
     const nearbyComp = await plugin.builders.structure.tryCreateComponentFromExpression(merged, nearbyExpr, "pose-contact-residues");
     await addRep(nearbyComp, "ball-and-stick", "element-symbol", undefined, { sizeFactor: 0.18 });
 
-    interactionRefs = [merged];
+    interactionRefs.push(merged);
   } catch (err) {
     console.warn("interactions failed", err);
   }
@@ -1346,6 +1513,10 @@ function updateScoringOptions(engine) {
   const scoringSelect = $("scoring");
   scoringSelect.innerHTML = "";
 
+  // For MOE this picks the rescoring function applied after refinement
+  // (placement is always London dG, as in MOE's own Dock panel).
+  $("scoringLabel").textContent = engine === "moe" ? "rescoring" : "scoring";
+  $("scoring").title = engine === "moe" ? "MOE rescoring after refinement - placement always uses London dG" : "";
   if (engine === "moe" && window.APP_STATUS?.moe_scoring_functions) {
     window.APP_STATUS.moe_scoring_functions.forEach(fn => {
       const opt = document.createElement("option");
@@ -1441,7 +1612,17 @@ function wire() {
     S.hideOrigLigand = !S.hideOrigLigand;
     $("hideLigandBtn").classList.toggle("active", S.hideOrigLigand);
     styleReceptor();
+    showInteractions(S.activePose).catch((err) => console.warn("interactions failed", err));
   };
+  // viewer-header shortcut for the receptor card's "delete existing ligand(s)
+  // before docking" checkbox - the two stay in sync either way
+  const syncDeleteLigandBtn = () => $("deleteLigandBtn").classList.toggle("active", $("removeLigand").checked);
+  $("deleteLigandBtn").onclick = () => {
+    $("removeLigand").checked = !$("removeLigand").checked;
+    syncDeleteLigandBtn();
+  };
+  $("removeLigand").addEventListener("change", syncDeleteLigandBtn);
+  syncDeleteLigandBtn();
   $("hideProteinBtn").onclick = () => {
     S.hideProtein = !S.hideProtein;
     $("hideProteinBtn").classList.toggle("active", S.hideProtein);
