@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """MOE Docking command-line wrapper."""
 
+import re
 import subprocess
-import shutil
+import threading
+import time
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Tuple, Optional
+
+from . import config
 
 
 class MoeBatchNotFound(RuntimeError):
@@ -16,33 +19,26 @@ class MoeDockingFailed(RuntimeError):
     pass
 
 
-@dataclass
-class MoePose:
-    """MOE docking pose result."""
-    rank: int
-    score: float
-    rmsd: Optional[float] = None
+# Server-wide cap on concurrent moebatch processes (see
+# config.MOE_MAX_CONCURRENT); every moebatch call goes through _run_moebatch.
+_LICENSE_SLOTS = threading.BoundedSemaphore(config.MOE_MAX_CONCURRENT)
+_LICENSE_ERROR = "Can't check out license"
 
 
-def find_moebatch() -> Optional[str]:
-    """Locate moebatch executable."""
-    # Check common install paths
-    candidates = [
-        Path("/Applications/moe2024.0604/bin/moebatch"),
-        Path("/Applications/moe/bin/moebatch"),
-    ]
-
-    # Also check versioned installs
-    apps = Path("/Applications")
-    if apps.is_dir():
-        for moe_dir in sorted(apps.glob("moe*"), reverse=True):
-            candidates.append(moe_dir / "bin" / "moebatch")
-
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    return shutil.which("moebatch")
+def _run_moebatch(cmd: list[str], timeout: int, cwd: Path) -> subprocess.CompletedProcess:
+    """Run moebatch once a local slot is free, retrying while the license
+    server has no tokens left (other users hold them) for up to
+    config.MOE_LICENSE_WAIT seconds. Runs in `cwd`, where Dock leaves its
+    dock_lig_*_bound_*.mdb scratch files. TimeoutExpired propagates."""
+    deadline = time.monotonic() + config.MOE_LICENSE_WAIT
+    while True:
+        with _LICENSE_SLOTS:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        if _LICENSE_ERROR not in (proc.stdout or "") + (proc.stderr or ""):
+            return proc
+        if time.monotonic() + config.MOE_LICENSE_RETRY > deadline:
+            return proc
+        time.sleep(config.MOE_LICENSE_RETRY)
 
 
 def _get_nucleophile_atom_name(resname: str) -> str:
@@ -99,6 +95,54 @@ def _build_simple_atom_filter(chain: str, resnum: int, atom_name: str) -> str:
     Chain is ignored: MOE renames chains on PDB import (tag becomes the file name).
     """
     return f"(rUID aResidue protein_atoms == {resnum} and aName protein_atoms == '{atom_name}')"
+
+
+# MOE's Ligand Interactions diagram (the GUI's, from prolig2d.svl) with its
+# legend underneath, written as SVG. Shared by the docking script and
+# render_interactions.
+LID_FUNCTION = """
+function DrawLigandInteractions;
+
+local function WriteLigandInteractions [lig, rec, file]
+    local key = first cat DrawLigandInteractions [[lig], [rec], []];
+    local leg = call ['_DrawLigandInteractionsLegend', [[], []], 'prolig2d.svl'];
+    local s1 = (gr_header key).size, s2 = (gr_header leg).size;
+    local w = max [s1(1), s2(1)];
+    local both = gr_create [size: [w, s1(2) + s2(2)]];
+    gr_draw [both, key, [(w - s1(1)) / 2, s2(2), 1, 1]];
+    gr_draw [both, leg, [(w - s2(1)) / 2, 0, 1, 1]];
+    gr_fwrite [file, both, 'image/svg+xml', [0, 0, 1, 1]];
+    gr_destroy [key, leg, both];
+endfunction
+"""
+
+# One diagram per pose, drawn inside the docking run while the receptor is
+# still loaded: no second moebatch run, so no second license checkout.
+LID_RENDER = """
+    local lid_db = db_Open ['{mdb}', 'read'];
+    local lid_ent, lid_lig, lid_k = 0;
+    for lid_ent in db_Entries lid_db loop
+        lid_k = lid_k + 1;
+        lid_lig = cat cAtoms mol_Create first db_ReadFields [lid_db, lid_ent, 'mol'];
+        WriteLigandInteractions [lid_lig, protein_atoms, twrite ['{prefix}{{}}.svg', lid_k]];
+        oDestroy uniq aChain lid_lig;
+    endloop
+    db_Close lid_db;
+"""
+
+
+def interactions_svg_path(out_sdf: Path, pose_index: int) -> Path:
+    """Where the docking run leaves pose `pose_index`'s (1-based) MOE Ligand
+    Interactions diagram for the poses file `out_sdf`."""
+    return out_sdf.with_name(f"{out_sdf.stem}_lid_{pose_index}.svg")
+
+
+def browser_svg(svg: str) -> str:
+    """MOE embeds an SVG font ("sf") that browsers ignore, so name real ones;
+    and give the transparent drawing the white page its colors are meant
+    for, since the app's panels are dark."""
+    svg = svg.replace('font-family="sf"', 'font-family="Helvetica, Arial, sans-serif"')
+    return re.sub(r"(<svg\b[^>]*>)", r'\1<rect width="100%" height="100%" fill="#ffffff"/>', svg, count=1)
 
 
 # MOE's Dock panel defaults: placement scored with London dG, 30 placement
@@ -200,9 +244,130 @@ def build_svl_script(
         REFINEMENT=refinement,
         PH4_FILE=str(ph4_file.absolute()) if ph4_file else '',
         COVALENT_OPTIONS=covalent_options,
+        LID_FUNCTION=LID_FUNCTION,
+        LID_RENDER=LID_RENDER.format(
+            mdb=out_mdb.absolute(),
+            prefix=str(interactions_svg_path(out_sdf, 0))[:-len("0.svg")],
+        ),
     )
 
     return script
+
+
+QUICKPREP_TEMPLATE = """#svl
+function _LIGX_Execute;
+
+global function main []
+    ReadPDB '{RECEPTOR_FILE}';
+
+    // QuickPrep keeps receptor atoms within 8 A of the ligand free during
+    // minimization and fixes the rest; naming the site ligand stops it from
+    // guessing (it would otherwise pick by class and drop known cofactors).
+    // With no ligand at all every atom is fixed and minimization is a no-op.
+    local atoms = Atoms [];
+    local site_lig = atoms | rName aResidue atoms == '{SITE_RESNAME}'
+        and rUID aResidue atoms == {SITE_RESSEQ};
+    if length site_lig then
+        oSetCollection ['LIGX_LIGAND', site_lig];
+    endif
+
+    // MOE's saved QuickPrep panel settings are used, as in the GUI.
+    _LIGX_Execute [verbose: 0];
+
+    oSetCollection ['LIGX_LIGAND', []];
+    WritePDB '{OUTPUT_PDB}';
+    Close [];
+endfunction
+"""
+
+
+def quickprep(
+    receptor_pdb: Path,
+    out_pdb: Path,
+    site_ligand: Optional[Tuple[str, int]] = None,
+    log_path: Optional[Path] = None,
+    timeout: int = 1800,
+) -> Path:
+    """Run MOE QuickPrep (Structure Preparation, Protonate3D, distant solvent
+    removal, tethered minimization) on a receptor and write it back as PDB,
+    hydrogens and formal charges included.
+
+    Args:
+        receptor_pdb: Receptor PDB, co-crystal ligand(s) included
+        out_pdb: Prepared receptor output
+        site_ligand: (resname, resseq) of the HETATM ligand defining the site
+        log_path: Optional log file path
+        timeout: Max runtime in seconds
+    """
+    moebatch = config.find_moebatch()
+    if not moebatch:
+        raise MoeBatchNotFound("moebatch not found - install MOE")
+
+    resname, resseq = site_ligand or ("", 0)
+    script = QUICKPREP_TEMPLATE.format(
+        RECEPTOR_FILE=str(receptor_pdb.absolute()),
+        OUTPUT_PDB=str(out_pdb.absolute()),
+        SITE_RESNAME=resname,
+        SITE_RESSEQ=resseq,
+    )
+    script_path = out_pdb.with_suffix(".svl")
+    script_path.write_text(script)
+
+    cmd = [moebatch, "-load", str(script_path), "-exec", "main []"]
+    try:
+        proc = _run_moebatch(cmd, timeout, cwd=out_pdb.parent)
+    except subprocess.TimeoutExpired:
+        raise MoeDockingFailed(f"QuickPrep timed out after {timeout}s (script: {script_path})")
+
+    if log_path:
+        log_path.write_text(f"$ {' '.join(cmd)}\n\n{proc.stdout}\n{proc.stderr}")
+
+    if proc.returncode != 0 or not out_pdb.exists():
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = tail[-1] if tail else f"moebatch exited {proc.returncode}"
+        raise MoeDockingFailed(f"QuickPrep failed: {reason} (script: {script_path})")
+
+    script_path.unlink()
+    return out_pdb
+
+
+RENDER_INTERACTIONS_TEMPLATE = """#svl
+function Open;
+{LID_FUNCTION}
+global function main []
+    ReadPDB '{RECEPTOR_FILE}';
+    local rec = Atoms [];
+    Open '{POSE_FILE}';
+    WriteLigandInteractions [diff [Atoms [], rec], rec, '{OUTPUT_SVG}'];
+endfunction
+"""
+
+
+def render_interactions(receptor_pdb: Path, pose_sdf: Path, out_svg: Path, timeout: int = 120) -> Path:
+    """Draw MOE's Ligand Interactions diagram for one pose (an SDF holding just
+    that pose) against a PDB receptor, outside of a docking run - for poses
+    docked before diagrams were drawn at docking time. Takes a license slot
+    like any moebatch run."""
+    moebatch = config.find_moebatch()
+    if not moebatch:
+        raise MoeBatchNotFound("moebatch not found - install MOE")
+    script_path = out_svg.with_suffix(".svl")
+    script_path.write_text(RENDER_INTERACTIONS_TEMPLATE.format(
+        LID_FUNCTION=LID_FUNCTION,
+        RECEPTOR_FILE=str(receptor_pdb.absolute()),
+        POSE_FILE=str(pose_sdf.absolute()),
+        OUTPUT_SVG=str(out_svg.absolute()),
+    ))
+    try:
+        proc = _run_moebatch([moebatch, "-load", str(script_path), "-exec", "main []"], timeout, cwd=out_svg.parent)
+    except subprocess.TimeoutExpired:
+        raise MoeDockingFailed(f"Ligand Interactions timed out after {timeout}s")
+    finally:
+        script_path.unlink(missing_ok=True)
+    if proc.returncode != 0 or not out_svg.exists():
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise MoeDockingFailed(tail[-1] if tail else f"moebatch exited {proc.returncode}")
+    return out_svg
 
 
 def dock(
@@ -247,7 +412,7 @@ def dock(
     Returns:
         Path to output SDF file
     """
-    moebatch = find_moebatch()
+    moebatch = config.find_moebatch()
     if not moebatch:
         raise MoeBatchNotFound("moebatch not found - install MOE")
 
@@ -269,19 +434,16 @@ def dock(
     # Convert PDB to MOE format if needed
     receptor_for_moe = receptor
     if receptor.suffix.lower() == '.pdb':
-        receptor_moe = receptor.with_suffix('.moe')
+        # Per ligand: ligands of one job share `receptor`, and each run
+        # deletes its converted copy when done.
+        receptor_moe = out_mdb.with_name(f"{out_mdb.stem}_receptor.moe")
 
         # Inline SVL for PDB to MOE conversion
         # Note: Uses ReadPDB/WriteMOE/Close - simple one-liner via -exec
         svl_cmd = f"ReadPDB '{receptor.absolute()}'; WriteMOE '{receptor_moe.absolute()}'; Close [];"
 
         try:
-            result = subprocess.run(
-                [moebatch, '-exec', svl_cmd],
-                capture_output=True,
-                timeout=60,
-                text=True
-            )
+            result = _run_moebatch([moebatch, '-exec', svl_cmd], timeout=60, cwd=out_mdb.parent)
 
             if not receptor_moe.exists():
                 stderr = (result.stderr or result.stdout or "").strip()
@@ -309,19 +471,17 @@ def dock(
 
     cmd = [moebatch, "-load", str(script_path), "-exec", "main []"]
 
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    proc = _run_moebatch(cmd, timeout, cwd=out_mdb.parent)
 
     if log_path:
         log_path.write_text(
             f"$ {' '.join(cmd)}\n\n{proc.stdout}\n{proc.stderr}"
         )
 
-    if proc.returncode != 0:
+    # The SDF is written before the interaction diagrams are drawn, so a
+    # diagram failure doesn't throw away the docking result; the endpoint
+    # falls back to drawing the diagram some other way.
+    if proc.returncode != 0 and not out_sdf.exists():
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise MoeDockingFailed(f"{tail[-1] if tail else f'moebatch exited {proc.returncode}'} (script: {script_path})")
 
@@ -339,13 +499,6 @@ def dock(
         receptor_for_moe.unlink()
 
     return out_sdf
-
-
-def parse_mdb_results(mdb_path: Path) -> list[MoePose]:
-    """Parse MOE database results (requires MOE Python API or db parser)."""
-    # Placeholder - would need MOE's Python API or custom MDB parser
-    # For now return empty list
-    return []
 
 
 if __name__ == "__main__":

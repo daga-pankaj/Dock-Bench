@@ -14,7 +14,12 @@ frontend/vendor/
 frontend/app.js
 frontend/app.js.map
 
-# MOE temp files
+# MOE temp files (Dock scratch databases included)
+*.mdb
 *.moe
 *_dock.svl
 *_debug.svl
+
+# local test data and large presentation binaries
+DPP-4/
+docs/presentation/*.pptx

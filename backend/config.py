@@ -20,6 +20,17 @@ TOOL_ENV = ROOT / ".env-tools"
 # How many ligands may dock at the same time. Each smina call gets one core.
 MAX_WORKERS = int(os.environ.get("DOCKING_WORKERS", max(1, (os.cpu_count() or 4) - 1)))
 
+# moebatch runs allowed at once across the whole server - every run checks
+# out MOE license tokens shared with other users (6 tokens, 2 per run, at
+# the time of writing). Ligands beyond this wait in a queue rather than
+# failing on a license error, and tokens stay free for other users.
+MOE_MAX_CONCURRENT = int(os.environ.get("MOE_MAX_CONCURRENT", 1))
+
+# How long one moebatch run keeps retrying when the license server is out
+# of tokens (someone else is using them), seconds, and how often it retries.
+MOE_LICENSE_WAIT = int(os.environ.get("MOE_LICENSE_WAIT", 3600))
+MOE_LICENSE_RETRY = 30
+
 # Hard stop for a single ligand, seconds.
 SMINA_TIMEOUT = int(os.environ.get("SMINA_TIMEOUT", 1800))
 

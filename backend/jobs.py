@@ -262,6 +262,11 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=config.MAX_WORKERS, thread_name_prefix="dock")
+        # MOE ligands get their own pool, sized to the license budget: they
+        # queue across all jobs (status "queued") instead of all starting
+        # at once and failing for want of tokens, and they don't tie up the
+        # smina/gnina workers while they wait.
+        self._moe_pool = ThreadPoolExecutor(max_workers=config.MOE_MAX_CONCURRENT, thread_name_prefix="moe")
         self._load_from_disk()
 
     def _load_from_disk(self) -> None:
@@ -326,8 +331,9 @@ class JobManager:
 
         # One pool task per ligand: a 500-ligand job streams through the pool
         # instead of blocking a worker for the whole batch.
+        pool = self._moe_pool if params.engine == "moe" else self._pool
         for spec, run in zip(specs, ligands):
-            self._pool.submit(self._run_one, job, spec, run)
+            pool.submit(self._run_one, job, spec, run)
         return job
 
     # -- worker ------------------------------------------------------------

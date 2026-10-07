@@ -130,6 +130,7 @@ button:disabled, .btnlink.disabled { opacity: .45; cursor: not-allowed; }
   background: var(--card2);
   cursor: pointer;
 }
+.qp-states { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .het:hover, .predicted-site:hover { border-color: var(--accent); }
 .het.active, .predicted-site.active { background: var(--accent); color: #05121f; border-color: var(--accent); }
 .het .n, .predicted-site .n { color: var(--muted); margin-left: 5px; }

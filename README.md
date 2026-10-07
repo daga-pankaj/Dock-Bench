@@ -1,34 +1,76 @@
 # Docking Bench
 
-Local web app for small-molecule docking against a protein receptor, using
-[smina](https://sourceforge.net/projects/smina/) or
-[gnina](https://github.com/gnina/gnina) (GPU-capable, Linux only) as the
-docking engine and [RDKit](https://www.rdkit.org/) for ligand 3D structure
-generation. Runs entirely on your machine — no external services beyond
-fetching PDB files from RCSB. The 3D viewer is [Mol*](https://molstar.org/),
+Local web app for small-molecule docking against a protein receptor. Three
+docking engines, picked per job:
+
+- [smina](https://sourceforge.net/projects/smina/) (CPU)
+- [gnina](https://github.com/gnina/gnina) (CNN scoring, CUDA GPU on Linux)
+- [MOE](https://www.chemcomp.com/) Dock, driven headless through `moebatch`
+  (needs a licensed MOE install; optional)
+
+[RDKit](https://www.rdkit.org/) builds ligand 3D structures. Runs entirely on
+your machine — no external services beyond fetching PDB files and chemical
+component SMILES from RCSB. The 3D viewer is [Mol*](https://molstar.org/),
 bundled locally at setup time (see "Frontend viewer build" below).
 
 ## Features
 
+### All engines
+
 - Fetch a receptor by PDB ID (RCSB) or upload a `.pdb` file
-- Auto-detect binding sites using [fpocket](https://github.com/Discngine/fpocket)
-  (geometric pocket finder), bound HETATM ligands/cofactors, or click atoms
-  in the 3D viewer to build a box manually
-- Load ligands from pasted SMILES, or upload `.smi`/`.sdf`/`.mol`/`.csv`/`.tsv`
-- Dock many ligands concurrently (one docking process per ligand, thread pool)
-- Pick smina or gnina as the engine per job; gnina can use a CUDA GPU when
-  one's present (Linux/WSL2 only — no Windows build upstream)
-- Optional pharmacophoric constraints (H-bond donor/acceptor, or any-atom
-  "positional") checked against each pose after docking and used to rerank
-  poses toward the ones that satisfy them — smina/gnina have no way to bias
-  their own search this way, so this is post-hoc filtering/reranking, not a
+- Set the docking site from a bound HETATM ligand/cofactor, or click atoms in
+  the 3D viewer to build a box manually
+- Receptor cleanup before docking: delete the bound ligand(s), keep or drop
+  waters, delete whole chains (e.g. a peptide ligand chain), drop extra
+  monomers far from the site
+- Load ligands from pasted SMILES, or upload `.smi`/`.sdf`/`.mol`/`.csv`/`.tsv`;
+  "self-dock" a bound ligand straight from its PDB chemical component SMILES
+- Optional pharmacophoric constraints (H-bond donor/acceptor, aromatic,
+  metal, SMARTS or any-atom "positional") checked against each pose after
+  docking and used to rerank poses — post-hoc filtering/reranking, not a
   constrained search (see `backend/pharmacophore.py`)
-- Self-docking validation: redock a receptor's own bound ligand and get
-  each pose's RMSD to its real crystallographic position, read straight off
-  the PDB's HETATM records and computed with `obrms` (bundled alongside
-  smina/gnina — see `backend/rmsd.py`)
-- Live job progress, per-ligand poses viewable in-browser, CSV/ZIP export
+- Self-docking validation: each pose's RMSD to the receptor's own bound
+  ligand, computed with `obrms` (see `backend/rmsd.py`)
+- Ligand strain energy per pose (MMFF94, see `backend/strain.py`)
+- 2D interaction diagram per pose: MOE's Ligand Interactions diagram when MOE
+  is installed, otherwise a ProLIF-based one (switchable in the panel); 3D
+  non-covalent contacts drawn in the viewer
+- Live job progress, per-ligand poses viewable and steppable in-browser,
+  CSV/ZIP export
 - Job history survives a server restart (state reloaded from `runs/jobs/`)
+
+### smina / gnina
+
+- Many ligands dock concurrently (one process per ligand, thread pool)
+- gnina can use a CUDA GPU when one's present (Linux/WSL2 only — no Windows
+  build upstream)
+- Optional extra `--minimize` pass on every pose after docking
+
+### MOE
+
+- Placement (Triangle Matcher, Alpha PMI, Pharmacophore, ...), refinement
+  (Rigid Receptor, Induced Fit, ...) and rescoring (GBVI/WSA dG, London dG,
+  ...) chosen per job, with MOE's Dock panel defaults; every pose's MOE
+  scores (S, E_place, E_refine, ...) shown in a collapsible table
+- **QuickPrep** button in the receptor panel: runs MOE QuickPrep (Structure
+  Preparation, Protonate3D, distant-water removal, tethered minimization
+  around the selected site ligand) with your saved MOE QuickPrep settings.
+  The prepared receptor replaces the loaded one in the viewer, with a report
+  of what changed (hydrogens added, atoms moved, protonation states chosen —
+  site residues first), and is what gets docked
+- Covalent docking against a chosen Cys/Ser/Thr/Tyr/Lys, using MOE's built-in
+  reaction templates or an uploaded `.rxn` file; warns when a ligand isn't
+  in the reactant form the reaction needs
+- Pharmacophore-constrained placement from an uploaded MOE `.ph4` file
+- Ligand Interactions diagrams are drawn during the docking run itself, so
+  they cost no extra license checkout
+- License-aware queue: MOE runs are capped server-wide
+  (`MOE_MAX_CONCURRENT`, default 1) so ligands wait as "queued" instead of
+  failing on license errors, and runs retry while other users hold the
+  license tokens
+
+MOE internals (how runs are scripted, QuickPrep, covalent docking, SVL
+pitfalls, debugging against the GUI) are documented in [docs/MOE.md](docs/MOE.md).
 
 ## Setup
 
@@ -54,6 +96,10 @@ Safe to re-run; existing installs are reused. Supported platforms: macOS
 (arm64/x86_64), Linux (x86_64/aarch64, gnina needs x86_64), Windows (x86_64,
 smina only).
 
+MOE is not installed by setup. If you have it, the app finds `moebatch` under
+`/Applications/moe*/bin/` or on `PATH`, or set `MOEBATCH_BIN` to its path.
+Without MOE the MOE engine option is simply unavailable.
+
 ## Run
 
 ```bash
@@ -66,8 +112,11 @@ PORT=9000 ./run.sh        # pick a different port
 $env:PORT=9000; .\run.ps1  # pick a different port
 ```
 
-Open the printed URL in a browser. The top-right pill shows whether smina
-and/or gnina were found; if not, re-run `./setup.sh` (or `setup.ps1`).
+Open the printed URL in a browser. The top-right pill shows which engines
+(smina, gnina, MOE) were found; if smina/gnina are missing, re-run
+`./setup.sh` (or `setup.ps1`).
+
+The server doesn't reload code changes — restart it after pulling updates.
 
 ## Sharing with a remote colleague
 
@@ -97,8 +146,9 @@ machine can reach it. To hand a colleague a link:
 ```
 
 Tests cover receptor cleanup/HET detection, ligand parsing, smina/gnina
-command construction, and job persistence — they mock the subprocess call,
-so they run without smina or gnina installed.
+command construction, MOE script generation and license queueing, and job
+persistence — they mock the subprocess call, so they run without smina,
+gnina or MOE installed.
 
 ## Frontend viewer build
 
@@ -123,12 +173,21 @@ npm run watch    # rebuild on every save while developing
 
 ```
 backend/
-  main.py           FastAPI app: receptor/ligand/job HTTP routes
-  jobs.py           Job store: one job -> many ligands, each docked in a thread
-  docking.py        Thin wrapper around the smina/gnina CLI
-  prep.py           Receptor cleanup, HET-ligand grouping, ligand parsing/3D embed
-  binding_sites.py  fpocket wrapper for automated binding site detection
-  config.py         Paths and runtime settings (env-var overridable)
+  main.py                 FastAPI app: receptor/ligand/job HTTP routes
+  jobs.py                 Job store: one job -> many ligands, each docked in a thread
+  docking.py              Engine dispatch; smina/gnina CLI wrapper, MOE pose parsing
+  moe_dock.py             moebatch wrapper: Dock, QuickPrep, Ligand Interactions,
+                          license queue
+  moe_dock_template.svl   SVL script template for a MOE docking run
+  prep.py                 Receptor cleanup, HET-ligand grouping, ligand parsing/3D
+                          embed, QuickPrep report
+  covalent_check.py       Ligand reactant-form checks for covalent docking
+  pharmacophore.py        Post-docking pharmacophoric constraints
+  rmsd.py                 Self-docking RMSD via obrms
+  strain.py               Ligand strain energy (MMFF94)
+  interactions_prolif.py  ProLIF interaction detection
+  interaction_render.py   ProLIF-based 2D interaction diagram (SVG)
+  config.py               Paths and runtime settings (env-var overridable)
 frontend/
   index.html, style.css     Static single-page UI shell
   src/app.js                Real source (imports Mol* directly) - edit this
@@ -137,6 +196,7 @@ frontend/
                              src/app.js; vendor/molstar.css is copied from the
                              molstar package)
   package.json, build.mjs   esbuild bundling (see "Frontend viewer build")
+docs/         MOE.md (MOE integration notes); presentation/ slides
 tests/        pytest suite for the backend
 runs/         receptor uploads + job outputs (gitignored; created at runtime)
 ```
@@ -151,6 +211,9 @@ runs/         receptor uploads + job outputs (gitignored; created at runtime)
 | `SMINA_TIMEOUT`      | `1800` (seconds)          | per-ligand docking hard timeout       |
 | `SMINA_BIN`          | (unset)                   | explicit path to a smina executable   |
 | `GNINA_BIN`          | (unset)                   | explicit path to a gnina executable   |
+| `MOEBATCH_BIN`       | (unset)                   | explicit path to MOE's `moebatch`     |
+| `MOE_MAX_CONCURRENT` | `1`                       | MOE runs allowed at once, server-wide (each checks out license tokens) |
+| `MOE_LICENSE_WAIT`   | `3600` (seconds)          | how long a MOE run keeps retrying while no license tokens are free |
 | `OBRMS_BIN`          | (unset)                   | explicit path to an obrms executable (self-docking RMSD) |
 | `DOCKING_MAX_LIGANDS`| `50`                      | max ligands accepted per job          |
 | `DOCKING_REQUIRE_AUTH`| (unset)                  | set to anything to turn on HTTP Basic auth with an auto-generated password (printed to console on start) |
@@ -160,5 +223,8 @@ runs/         receptor uploads + job outputs (gitignored; created at runtime)
 ## Known limitations
 
 - mmCIF receptors are rejected — upload a `.pdb` file
-- No authentication; intended for local/single-user use
+- Intended for local/trusted use; authentication is optional HTTP Basic only
+  (see "Sharing with a remote colleague")
+- Ligands are docked in the protonation state their SMILES/SDF gives (no
+  Wash/pH 7 step) — write charged groups explicitly, e.g. `[NH3+]`
 - `runs/` is not pruned automatically — old jobs accumulate on disk

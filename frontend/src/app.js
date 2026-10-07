@@ -81,6 +81,7 @@ const S = {
   hideOrigLigand: false, // hide co-crystallized ligand from the complex
   hideProtein: false,    // hide the receptor's polymer cartoon from the complex
   diagramHidden: false,   // 2D interaction diagram panel toggled off
+  diagramStyle: "moe",     // 2D diagram renderer asked for: "moe" (when installed) or "prolif"
   diagramUrl: null,        // current object URL behind #diagramImg, revoked on change
   depictionUrl: null,      // object URL behind the viewer's 2D ligand overlay
   receptorPanelHidden: false,     // "1 · Receptor" card minimized
@@ -88,7 +89,8 @@ const S = {
   pharmacophorePanelHidden: false, // "3 · Pharmacophore constraints" card minimized
   covalentPanelHidden: false,      // "3b · Covalent docking" card minimized
   ligandsPanelHidden: false,       // "4 · Ligands" card minimized
-  expandedResultRows: new Set(),   // ligand names whose per-pose score/strain breakdown is open
+  moeScoresHidden: false,          // Results header toggle: collapse every MOE per-pose score table
+  toggledResultRows: new Set(),    // ligand names whose per-pose breakdown was toggled away from its default (open for MOE, closed otherwise)
 };
 
 let plugin = null;
@@ -357,6 +359,23 @@ async function styleReceptor() {
     const activeRep = await addRep(activeComp, "ball-and-stick", "uniform", { value: Color(0xf5a623) }, { sizeFactor: 0.28 });
     track(activeRep);
     hideIfOrig(activeRep);
+
+    // After QuickPrep the point is to see what it decided in the pocket:
+    // site residues as sticks with their polar hydrogens, so His tautomers
+    // and charged/neutral acids and bases read off the structure directly.
+    if (S.receptor?.prepared_from) {
+      const pocketExpr = MS.struct.modifier.exceptBy({
+        0: MS.struct.modifier.includeSurroundings({ 0: hetExpr(S.activeHet), radius: 5, "as-whole-residues": true }),
+        by: hetExpr(S.activeHet),
+      });
+      const pocketComp = await plugin.builders.structure.tryCreateComponentFromExpression(
+        receptorStructure, pocketExpr, "quickprep-pocket");
+      track(pocketComp);
+      const pocketRep = await addRep(pocketComp, "ball-and-stick", "element-symbol", undefined,
+        { sizeFactor: 0.2, ignoreHydrogens: true, ignoreHydrogensVariant: "non-polar" });
+      track(pocketRep);
+      hideIfProtein(pocketRep);
+    }
   }
 }
 
@@ -711,7 +730,7 @@ function renderHetList() {
   box.innerHTML = "";
   const hets = S.receptor.het_ligands || [];
   if (!hets.length) {
-    box.innerHTML = '<span class="muted small">no bound ligands found - use "pick atoms" or "find sites"</span>';
+    box.innerHTML = '<span class="muted small">no bound ligands found - use "pick atoms"</span>';
     return;
   }
   hets.forEach((h) => {
@@ -751,6 +770,92 @@ function renderChainList() {
   });
 }
 
+function residueExpr(chain, resseq) {
+  return MS.struct.generator.atomGroups({
+    "chain-test": MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), chain]),
+    "residue-test": MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), resseq]),
+  });
+}
+
+function renderQuickPrepReport(report) {
+  const box = $("quickPrepReport");
+  box.innerHTML = "";
+  if (!report) return;
+  const summary = document.createElement("div");
+  summary.className = "muted";
+  summary.textContent =
+    `+${report.hydrogens_added} H, ${report.heavy_atoms_added} heavy atoms built, ` +
+    `${report.waters_removed} waters removed, ${report.n_moved} heavy atoms moved >0.5 Å ` +
+    `(RMSD ${report.rmsd_heavy} Å, max ${report.max_shift} Å)`;
+  box.appendChild(summary);
+  if (!report.protonation.length) return;
+  const list = document.createElement("div");
+  list.className = "qp-states";
+  // Site residues come first from the backend and are highlighted.
+  report.protonation.forEach((p) => {
+    const el = document.createElement("span");
+    el.className = "het" + (p.near_site ? " active" : "");
+    el.title = p.near_site ? "within 6 Å of the site ligand - click to zoom" : "click to zoom";
+    el.textContent = `${p.residue} ${p.state}`;
+    const [, chainRes] = p.residue.split(" ");
+    el.onclick = () => zoomToExpression(residueExpr(chainRes[0], parseInt(chainRes.slice(1), 10)));
+    list.appendChild(el);
+  });
+  box.appendChild(list);
+}
+
+// Swap the loaded receptor for another version of itself (QuickPrep'd or
+// original) without losing the docking site the user had set up.
+async function swapReceptor(meta) {
+  const siteKey = S.activeHet?.key;
+  const center = boxCenter(), size = boxSize();
+  await loadReceptor(meta);
+  const het = siteKey && (meta.het_ligands || []).find((h) => h.key === siteKey);
+  if (het) useHet(het);
+  else if (center) { S.activeHet = null; styleReceptor(); setBox(center, size); }
+}
+
+async function runQuickPrep() {
+  if (!S.receptor) return toast("load a receptor first", true);
+  const original = S.receptor;
+  $("quickPrepBtn").disabled = true;
+  $("quickPrepInfo").textContent = "running MOE QuickPrep - can take a minute for a large protein...";
+  try {
+    const meta = await api(`/api/receptor/${original.id}/quickprep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ site_ligand_key: S.activeHet ? S.activeHet.key : null }),
+    });
+    meta.name = `${original.name} (QuickPrep)`;
+    await swapReceptor(meta);
+    S.originalReceptor = original;
+    renderQuickPrepReport(meta.quickprep_report);
+    $("quickPrepInfo").textContent = S.activeHet
+      ? `site prepared around ${S.activeHet.resname} ${S.activeHet.chain}${S.activeHet.resseq}`
+      : "no site ligand selected - receptor protonated but not minimized";
+  } catch (err) {
+    $("quickPrepInfo").textContent = "";
+    toast(err.message, true);
+  } finally {
+    updateQuickPrepUi();
+  }
+}
+
+async function revertQuickPrep() {
+  if (!S.originalReceptor) return;
+  await swapReceptor(S.originalReceptor);
+}
+
+function updateQuickPrepUi() {
+  const prepared = !!S.receptor?.prepared_from;
+  $("quickPrepBtn").disabled = !S.receptor || prepared;
+  $("quickPrepRevertBtn").style.display = prepared && S.originalReceptor ? "" : "none";
+  if (!prepared) {
+    $("quickPrepInfo").textContent = "";
+    renderQuickPrepReport(null);
+  }
+}
+
 async function loadReceptor(meta) {
   S.receptor = meta;
   S.pdbText = await api(`/api/receptor/${meta.id}/pdb`);
@@ -786,6 +891,9 @@ async function loadReceptor(meta) {
   const best = (meta.het_ligands || []).find((h) => !h.is_ion);
   if (best) useHet(best);
   else drawBox();
+
+  if (!meta.prepared_from) S.originalReceptor = null;
+  updateQuickPrepUi();
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1278,16 @@ function renderJob(job) {
     return a.best_score - b.best_score;
   });
 
+  const hasMoeScores = job.ligands.some((l) => l.pose_scores && l.pose_scores.length > 0);
+  const moeBtn = $("toggleMoeScoresBtn");
+  moeBtn.style.display = hasMoeScores ? "" : "none";
+  moeBtn.textContent = S.moeScoresHidden ? "show MOE scores ▾" : "hide MOE scores ▴";
+  moeBtn.onclick = () => {
+    S.moeScoresHidden = !S.moeScoresHidden;
+    S.toggledResultRows.clear();  // the header button sets every row
+    renderJob(job);
+  };
+
   const tbody = $("results").querySelector("tbody");
   tbody.innerHTML = "";
   rows.forEach((lig) => {
@@ -1179,7 +1297,10 @@ function renderJob(job) {
     const isMoe = lig.pose_scores && lig.pose_scores.length > 0;
     const warnings = lig.warnings || [];
     const hasBreakdown = (lig.scores && lig.scores.length > 1) || isMoe || warnings.length > 0;
-    const expanded = S.expandedResultRows.has(lig.name);
+    // MOE's per-pose score table is the point of a MOE result, so it starts
+    // open (unless hidden from the Results header); other engines' one-line
+    // breakdown starts closed. A row's own toggle flips its default.
+    const expanded = (isMoe && !S.moeScoresHidden) !== S.toggledResultRows.has(lig.name);
     // rmsd_to_reference[0] is the top-ranked pose's RMSD to the receptor's
     // own bound-ligand position (backend/rmsd.py) - only present for a
     // validation run, and only non-null for the ligand that matched it.
@@ -1199,8 +1320,8 @@ function renderJob(job) {
     if (hasBreakdown) {
       tr.querySelector(".posetoggle").onclick = (e) => {
         e.stopPropagation();
-        if (S.expandedResultRows.has(lig.name)) S.expandedResultRows.delete(lig.name);
-        else S.expandedResultRows.add(lig.name);
+        if (S.toggledResultRows.has(lig.name)) S.toggledResultRows.delete(lig.name);
+        else S.toggledResultRows.add(lig.name);
         renderJob(job);
       };
     }
@@ -1430,13 +1551,16 @@ async function showInteractionDiagram(idx) {
   img.classList.add("hidden");
   try {
     const name = encodeURIComponent(S.selectedLigandObj.name);
-    const res = await fetch(`/api/jobs/${S.job.id}/ligands/${name}/poses/${idx + 1}/interactions2d.svg`);
+    const style = window.APP_STATUS?.moe_available ? S.diagramStyle : "prolif";
+    const res = await fetch(`/api/jobs/${S.job.id}/ligands/${name}/poses/${idx + 1}/interactions2d.svg?style=${style}`);
     if (!res.ok) {
       let detail = res.statusText;
       try { detail = (await res.json()).detail || detail; } catch (_) {}
       throw new Error(detail);
     }
     const svgText = await res.text();
+    const source = res.headers.get("X-Diagram-Source");
+    if (style === "moe" && source === "prolif") toast("MOE couldn't draw this diagram - showing the ProLIF one");
     const blob = new Blob([svgText], { type: "image/svg+xml" });
     S.diagramUrl = URL.createObjectURL(blob);
     img.src = S.diagramUrl;
@@ -1540,6 +1664,9 @@ function updateScoringOptions(engine) {
 // ---------------------------------------------------------------------------
 
 function wire() {
+  $("quickPrepBtn").onclick = runQuickPrep;
+  $("quickPrepRevertBtn").onclick = revertQuickPrep;
+
   $("fetchBtn").onclick = async () => {
     const id = $("pdbId").value.trim();
     if (!id) return;
@@ -1628,6 +1755,15 @@ function wire() {
     $("hideProteinBtn").classList.toggle("active", S.hideProtein);
     styleReceptor();
   };
+  document.querySelectorAll("#diagramStyleSeg .segbtn").forEach((btn) => {
+    btn.onclick = () => {
+      S.diagramStyle = btn.dataset.style;
+      document.querySelectorAll("#diagramStyleSeg .segbtn").forEach((b) =>
+        b.classList.toggle("active", b === btn));
+      showInteractionDiagram(S.activePose ?? -1).catch((err) => console.warn("2d diagram failed", err));
+    };
+  });
+
   $("toggleDiagramBtn").onclick = () => {
     S.diagramHidden = !S.diagramHidden;
     $("toggleDiagramBtn").textContent = S.diagramHidden ? "+" : "_";
@@ -1781,6 +1917,7 @@ function wire() {
 
     // Show/hide MOE-specific params
     $("moeParamsRow").style.display = isMoe ? "grid" : "none";
+    $("quickPrepRow").style.display = isMoe ? "flex" : "none";
 
     // Show/hide covalent docking panel (MOE only)
     $("covalentCard").style.display = isMoe ? "block" : "none";
@@ -1813,6 +1950,7 @@ async function boot() {
   try {
     const st = await api("/api/status");
     window.APP_STATUS = st;  // Store for updateScoringOptions
+    $("diagramStyleSeg").style.display = st.moe_available ? "flex" : "none";
 
     // Populate engine selector based on available engines
     const engineSel = $("engineSel");

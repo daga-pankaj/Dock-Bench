@@ -120,6 +120,10 @@ def list_het_ligands(pdb_text: str, min_atoms: int = 4) -> list[HetLigand]:
         resname = _resname(line)
         if resname in WATER:
             continue
+        # A QuickPrep'd receptor carries ligand hydrogens; site size and atom
+        # count stay on heavy atoms, as for a crystal structure.
+        if _element(line) in ("H", "D"):
+            continue
         chain = line[21].strip() or "_"
         resseq = line[22:27].strip()
         groups.setdefault(f"{resname}:{chain}:{resseq}", []).append(line)
@@ -213,6 +217,7 @@ def clean_receptor(
     exclude_chains: Iterable[str] = (),
     site_center: tuple[float, float, float] | None = None,
     chain_cutoff: float = 15.0,
+    keep_hydrogens: bool = False,
 ) -> str:
     """Strip everything smina should not treat as the rigid receptor.
 
@@ -228,6 +233,10 @@ def clean_receptor(
     `chain_cutoff` A of it are dropped too - extra copies of the protein (or
     other neighbour chains) elsewhere in the asymmetric unit that cannot
     reach the docking box anyway.
+
+    `keep_hydrogens` is for a receptor that was already protonated on
+    purpose (MOE QuickPrep): its hydrogens and the formal-charge columns are
+    kept instead of being stripped as crystal-structure noise.
     """
     keep_het = {k.upper() for k in keep_het}
     exclude_chains = {c.upper() for c in exclude_chains}
@@ -260,6 +269,9 @@ def clean_receptor(
                 pass
             else:
                 continue
+        if keep_hydrogens:
+            kept.append(line[:80])
+            continue
         # Hydrogens from the crystal structure are unreliable; smina adds its own.
         element = line[76:78].strip().upper()
         if element == "H" or (not element and line[12:16].strip().startswith("H")):
@@ -267,6 +279,103 @@ def clean_receptor(
         kept.append(line[:66].ljust(66))
     kept.append("END")
     return "\n".join(kept) + "\n"
+
+
+# --------------------------------------------------------------------------
+# QuickPrep report
+# --------------------------------------------------------------------------
+
+
+def _formal_charge(line: str) -> int:
+    """PDB columns 79-80, e.g. "1+" / "1-"; blank means neutral."""
+    field = line[78:80].strip()
+    if len(field) == 2 and field[0].isdigit() and field[1] in "+-":
+        return int(field[0]) * (1 if field[1] == "+" else -1)
+    return 0
+
+
+def _protonation_state(resname: str, atoms: dict[str, str]) -> str | None:
+    """Protonation state worth reporting for one residue (atom name -> line),
+    or None when it is the usual one at pH 7. HIS is always reported, since
+    which nitrogen carries the H is exactly what Protonate3D decides."""
+    names = set(atoms)
+    charge = sum(_formal_charge(line) for line in atoms.values())
+    if resname == "HIS":
+        d1, e2 = "HD1" in names, "HE2" in names
+        return "HIP (+1)" if d1 and e2 else "HID" if d1 else "HIE" if e2 else None
+    if resname == "ASP" and charge == 0 and names & {"HD1", "HD2"}:
+        return "ASH (neutral)"
+    if resname == "GLU" and charge == 0 and names & {"HE1", "HE2"}:
+        return "GLH (neutral)"
+    if resname == "LYS" and charge == 0 and "HZ1" in names:
+        return "LYN (neutral)"
+    if resname == "ARG" and charge == 0 and "HH11" in names:
+        return "ARN (neutral)"
+    if resname == "CYS" and charge < 0:
+        return "CYM (-1)"
+    if resname == "TYR" and charge < 0:
+        return "TYM (-1)"
+    return None
+
+
+def quickprep_report(
+    original_pdb: str,
+    prepared_pdb: str,
+    site_coords: list[tuple[float, float, float]] = (),
+    site_radius: float = 6.0,
+) -> dict:
+    """What MOE QuickPrep changed: hydrogens added, waters removed, residues
+    built, how far heavy atoms moved in the minimization, and the
+    protonation states it chose. Residues within `site_radius` of any
+    `site_coords` atom (the site ligand) are flagged and listed first."""
+    def records(text):
+        out = {}
+        for tag, line in _atom_records(text):
+            if line[16] not in (" ", "A"):
+                continue
+            key = (line[21], line[22:27].strip(), _resname(line), _atom_name(line))
+            out[key] = line
+        return out
+
+    orig, prepd = records(original_pdb), records(prepared_pdb)
+    is_h = lambda line: _element(line) in ("H", "D")
+    n_water = lambda recs: len({k[:3] for k in recs if k[2] in WATER})
+
+    shifts = []
+    for key, line in prepd.items():
+        if is_h(line) or key not in orig or is_h(orig[key]):
+            continue
+        a, b = _xyz(orig[key]), _xyz(line)
+        shifts.append(sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5)
+
+    residues: dict[tuple, dict[str, str]] = {}
+    for key, line in prepd.items():
+        if line.startswith("ATOM"):
+            residues.setdefault(key[:3], {})[key[3]] = line
+
+    states = []
+    r2 = site_radius ** 2
+    for (chain, resseq, resname), atoms in residues.items():
+        state = _protonation_state(resname, atoms)
+        if state is None:
+            continue
+        near = any(
+            sum((p - c) ** 2 for p, c in zip(_xyz(line), site)) <= r2
+            for line in atoms.values() for site in site_coords
+        )
+        states.append({"residue": f"{resname} {chain.strip() or '_'}{resseq}", "state": state, "near_site": near})
+    states.sort(key=lambda s: not s["near_site"])
+
+    heavy = lambda recs: sum(1 for line in recs.values() if not is_h(line))
+    return {
+        "hydrogens_added": sum(1 for l in prepd.values() if is_h(l)) - sum(1 for l in orig.values() if is_h(l)),
+        "heavy_atoms_added": max(0, heavy(prepd) - heavy(orig)),
+        "waters_removed": n_water(orig) - n_water(prepd),
+        "rmsd_heavy": round((sum(d * d for d in shifts) / len(shifts)) ** 0.5, 3) if shifts else 0.0,
+        "max_shift": round(max(shifts), 3) if shifts else 0.0,
+        "n_moved": sum(1 for d in shifts if d > 0.5),
+        "protonation": states,
+    }
 
 
 # --------------------------------------------------------------------------

@@ -3,14 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docking Bench — smina</title>
+<title>Docking Bench</title>
 <link rel="stylesheet" href="vendor/molstar.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <h1>Docking Bench</h1>
-  <span class="sub">smina · local docking</span>
   <span id="engine" class="pill warn">checking engine…</span>
 </header>
 
@@ -46,6 +45,12 @@
           <label><input type="checkbox" id="keepWaters"> keep waters in docking</label>
           <label><input type="checkbox" id="trimChains"> drop extra monomers far from site</label>
         </div>
+        <div class="row" id="quickPrepRow" style="display:none;">
+          <button id="quickPrepBtn" title="Structure Preparation, Protonate3D, distant-water removal and tethered minimization with MOE's QuickPrep settings. The selected bound ligand defines the site that stays flexible. The prepared receptor replaces the loaded one and is what gets docked.">MOE QuickPrep</button>
+          <button id="quickPrepRevertBtn" class="ghost" style="display:none;">use original</button>
+          <span id="quickPrepInfo" class="muted small"></span>
+        </div>
+        <div id="quickPrepReport" class="small"></div>
         <p class="muted small">Surface/waters/style etc. are all in the viewer's own
           panel (right side) - this is the full Mol* app, not a stripped-down view.</p>
       </div>
@@ -57,9 +62,9 @@
         <button id="toggleActiveSiteBtn" class="ghost mini" title="minimize this panel">_</button>
       </div>
       <div id="activeSiteBody">
-        <p class="muted small">Click <b>Find sites</b> to auto-detect binding pockets, click
-          a bound ligand in the viewer to box it, or switch to <b>pick atoms</b> and
-          click residues to build a box from the picks.</p>
+        <p class="muted small">Click a bound ligand in the viewer (or the list below) to
+          box it, or switch to <b>pick atoms</b> and click residues to build a box
+          from the picks.</p>
         <div class="row">
           <div class="seg">
             <button class="segbtn active" data-mode="ligand">click ligand</button>
@@ -258,7 +263,13 @@
     <div class="card" id="interactionCard">
       <div class="row viewer-head">
         <h2>2D Interaction Diagram</h2>
-        <button id="toggleDiagramBtn" class="ghost mini" title="minimize this panel">_</button>
+        <div class="row tight">
+          <div class="seg" id="diagramStyleSeg" style="display:none;" title="MOE's Ligand Interactions diagram, or the ProLIF-based one">
+            <button class="segbtn active" data-style="moe">MOE</button>
+            <button class="segbtn" data-style="prolif">ProLIF</button>
+          </div>
+          <button id="toggleDiagramBtn" class="ghost mini" title="minimize this panel">_</button>
+        </div>
       </div>
       <div id="diagramBody">
         <p id="diagramEmpty" class="muted small">select a pose to see its interaction diagram</p>
@@ -270,6 +281,7 @@
       <div class="row viewer-head">
         <h2>Results</h2>
         <div class="row tight">
+          <button id="toggleMoeScoresBtn" class="ghost" style="display:none;" title="show or hide every ligand's per-pose MOE score table">hide MOE scores ▴</button>
           <a id="dlZip" class="ghost btnlink disabled">Download all (ZIP)</a>
           <a id="dlCsv" class="ghost btnlink disabled">CSV</a>
         </div>

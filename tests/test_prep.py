@@ -193,3 +193,46 @@ def test_build_3d_rejects_empty_spec():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def _atom(serial, name, resname, resseq, xyz, element, charge="", tag="ATOM"):
+    x, y, z = xyz
+    return (f"{tag:<6}{serial:>5} {name:<4} {resname:>3} A{resseq:>4}    "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {element:>2}{charge:<2}")
+
+
+PREPPED_HIS = "\n".join([
+    _atom(1, "NE2", "HIS", 10, (0, 0, 0), "N"),
+    _atom(2, "HD1", "HIS", 10, (0, 1, 0), "H"),
+    _atom(3, "HE2", "HIS", 10, (1, 0, 0), "H", "1+"),
+    _atom(4, "C1", "LIG", 200, (2, 0, 0), "C", tag="HETATM"),
+    _atom(5, "H1", "LIG", 200, (3, 0, 0), "H", tag="HETATM"),
+]) + "\nEND\n"
+
+
+def test_clean_receptor_keep_hydrogens_keeps_h_and_charge_columns():
+    cleaned = prep.clean_receptor(PREPPED_HIS, keep_hydrogens=True, strip_ligand=False)
+    assert " HD1 " in cleaned
+    assert "N1+" not in cleaned and "H1+" in cleaned
+    assert " HD1 " not in prep.clean_receptor(PREPPED_HIS)
+
+
+def test_list_het_ligands_ignores_hydrogens_for_size_and_count():
+    het = prep.list_het_ligands(PREPPED_HIS, min_atoms=1)[0]
+    assert het.n_atoms == 1
+    assert het.size == [0.0, 0.0, 0.0]
+
+
+def test_quickprep_report_flags_site_his_tautomer_and_counts():
+    original = "\n".join([
+        _atom(1, "NE2", "HIS", 10, (0, 0, 0), "N"),
+        _atom(4, "C1", "LIG", 200, (2, 0, 0), "C", tag="HETATM"),
+        _atom(6, "O", "HOH", 300, (30, 0, 0), "O", tag="HETATM"),
+    ]) + "\nEND\n"
+    prepared = PREPPED_HIS.replace(_atom(1, "NE2", "HIS", 10, (0, 0, 0), "N"),
+                                   _atom(1, "NE2", "HIS", 10, (0.6, 0, 0), "N"))
+    report = prep.quickprep_report(original, prepared, site_coords=[(2.0, 0.0, 0.0)])
+    assert report["hydrogens_added"] == 3
+    assert report["waters_removed"] == 1
+    assert report["n_moved"] == 1
+    assert report["protonation"] == [{"residue": "HIS A10", "state": "HIP (+1)", "near_site": True}]

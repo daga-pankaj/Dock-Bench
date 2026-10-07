@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
-from . import config, covalent_check, docking, prep
+from . import config, covalent_check, docking, moe_dock, prep
 from . import interaction_render
 from . import interactions_prolif as iprolif
 from . import pharmacophore as pharm
@@ -52,6 +52,17 @@ app = FastAPI(title="Docking Bench", version="1.0")
 PDB_ID_RE = re.compile(r"^[0-9A-Za-z]{4}$")
 COMP_ID_RE = re.compile(r"^[0-9A-Za-z]{1,5}$")
 MAX_BOX = 60.0
+
+
+@app.middleware("http")
+async def no_cache_frontend(request, call_next):
+    """Make the browser revalidate the frontend on every load. Without a
+    Cache-Control header it heuristically caches app.js/style.css, so a
+    rebuilt bundle can go unseen until a hard refresh."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
 
 
 @app.middleware("http")
@@ -86,6 +97,12 @@ async def basic_auth(request, call_next):
 
 class FetchRequest(BaseModel):
     pdb_id: str
+
+
+class QuickPrepRequest(BaseModel):
+    # het_ligands key (resname:chain:resseq) of the ligand defining the site;
+    # QuickPrep keeps receptor atoms near it flexible during minimization.
+    site_ligand_key: str | None = None
 
 
 class LigandInput(BaseModel):
@@ -166,11 +183,27 @@ def _receptor_path(receptor_id: str):
     return path
 
 
-def _store_receptor(name: str, text: str) -> dict:
+def _prepared_from(receptor_id: str) -> str | None:
+    """Id of the receptor a QuickPrep'd receptor was made from, else None."""
+    meta = _receptor_path(receptor_id).with_suffix(".json")  # validates the id
+    return json.loads(meta.read_text())["prepared_from"] if meta.exists() else None
+
+
+def _source_text(receptor_id: str) -> str:
+    """The as-uploaded PDB behind a receptor. For a QuickPrep'd one that is
+    its source: the crystal ligand pose (RMSD reference) and the LINK
+    records (covalent adducts) are only faithful there."""
+    return _receptor_path(_prepared_from(receptor_id) or receptor_id).read_text()
+
+
+def _store_receptor(name: str, text: str, prepared_from: str | None = None) -> dict:
     if "ATOM" not in text and "HETATM" not in text:
         raise HTTPException(400, "file contains no ATOM/HETATM records")
     receptor_id = uuid.uuid4().hex[:16]
     (config.RECEPTOR_DIR / f"{receptor_id}.pdb").write_text(text)
+    if prepared_from:
+        (config.RECEPTOR_DIR / f"{receptor_id}.json").write_text(
+            json.dumps({"prepared_from": prepared_from}))
     hets = prep.list_het_ligands(text)
     n_protein = sum(1 for tag, _ in prep._atom_records(text) if tag == "ATOM")
     return {
@@ -179,6 +212,7 @@ def _store_receptor(name: str, text: str) -> dict:
         "n_protein_atoms": n_protein,
         "het_ligands": [h.as_dict() for h in hets],
         "chains": [c.as_dict() for c in prep.list_chains(text)],
+        "prepared_from": prepared_from,
     }
 
 
@@ -310,6 +344,44 @@ def fetch_receptor(req: FetchRequest) -> dict:
     return _store_receptor(f"{pdb_id.upper()}.pdb", text)
 
 
+@app.post("/api/receptor/{receptor_id}/quickprep")
+def quickprep_receptor(receptor_id: str, req: QuickPrepRequest) -> dict:
+    """Run MOE QuickPrep on an uploaded receptor and store the result as a new
+    receptor (hydrogens, protonation states, minimized site, ligands kept),
+    so it can be inspected before docking and then docked into like any
+    other. The raw upload goes in, header included: Structure Preparation
+    uses SEQRES to build short missing loops, as in the GUI."""
+    if not config.find_moebatch():
+        raise HTTPException(503, "MOE not installed")
+    if _prepared_from(receptor_id):
+        raise HTTPException(400, "receptor is already QuickPrep'd")
+    src = _receptor_path(receptor_id)
+    text = src.read_text()
+
+    site, site_coords = None, []
+    if req.site_ligand_key:
+        block = prep.het_ligand_pdb_block(text, req.site_ligand_key)
+        if block is None:
+            raise HTTPException(400, f"site ligand {req.site_ligand_key} not found in receptor")
+        resname, _, resseq = req.site_ligand_key.split(":")
+        site = (resname, int(re.sub(r"\D", "", resseq) or 0))
+        site_coords = [prep._xyz(l) for l in block.splitlines() if l.startswith("HETATM")]
+
+    out = config.RECEPTOR_DIR / f"{receptor_id}_quickprep.pdb"
+    try:
+        moe_dock.quickprep(src, out, site_ligand=site,
+                           log_path=config.RECEPTOR_DIR / f"{receptor_id}_quickprep.log")
+    except moe_dock.MoeDockingFailed as exc:
+        raise HTTPException(500, str(exc)) from exc
+    prepared = out.read_text()
+    out.unlink()
+
+    # The upload's file name isn't stored server-side; the UI relabels this.
+    meta = _store_receptor("QuickPrep", prepared, prepared_from=receptor_id)
+    meta["quickprep_report"] = prep.quickprep_report(text, prepared, site_coords)
+    return meta
+
+
 @app.get("/api/receptor/{receptor_id}/pdb")
 def receptor_pdb(receptor_id: str) -> Response:
     return PlainTextResponse(_receptor_path(receptor_id).read_text())
@@ -358,7 +430,7 @@ def pdb_component_smiles(comp_id: str, receptor_id: str | None = None, het_key: 
         raise HTTPException(404, f"RCSB has no SMILES on file for {comp_id}")
     out = {"comp_id": comp_id, "smiles": smiles, "name": data.get("chem_comp", {}).get("name", comp_id)}
     if receptor_id and het_key:
-        acid = covalent_check.acid_form_from_link(_receptor_path(receptor_id).read_text(), het_key, smiles)
+        acid = covalent_check.acid_form_from_link(_source_text(receptor_id), het_key, smiles)
         if acid:
             out.update(smiles=acid, ccd_smiles=smiles,
                        covalent_note=f"{comp_id} is LINKed to the protein as an acyl adduct - "
@@ -484,6 +556,7 @@ def create_job(req: JobRequest) -> dict:
                 raise HTTPException(400, f"custom reaction file not found - re-upload")
 
     receptor_text = _receptor_path(req.receptor_id).read_text()
+    prepared = _prepared_from(req.receptor_id) is not None
 
     # Validate covalent residue exists in receptor
     if req.covalent_enabled and req.covalent_residue:
@@ -500,7 +573,7 @@ def create_job(req: JobRequest) -> dict:
 
     reference_ligand_pdb = None
     if req.reference_ligand_key:
-        reference_ligand_pdb = prep.het_ligand_pdb_block(receptor_text, req.reference_ligand_key)
+        reference_ligand_pdb = prep.het_ligand_pdb_block(_source_text(req.receptor_id), req.reference_ligand_key)
         if reference_ligand_pdb is None:
             raise HTTPException(400, f"bound ligand {req.reference_ligand_key} not found in receptor")
 
@@ -511,6 +584,7 @@ def create_job(req: JobRequest) -> dict:
         exclude_chains=req.exclude_chains,
         site_center=tuple(req.center) if req.trim_distant_chains else None,
         chain_cutoff=req.chain_cutoff,
+        keep_hydrogens=prepared,
     )
     if not cleaned.strip().splitlines()[:-1]:
         raise HTTPException(400, "receptor is empty after cleanup")
@@ -621,11 +695,36 @@ def ligand_depiction(job_id: str, name: str) -> Response:
     return Response(svg, media_type="image/svg+xml")
 
 
+def _moe_interactions_svg(job, poses_path, pose_index: int) -> str | None:
+    """MOE's own Ligand Interactions diagram for a pose. A MOE docking run
+    draws these itself (moe_dock.LID_RENDER); for smina/gnina poses, or MOE
+    jobs docked before that, it is drawn now (a short moebatch run in the
+    license queue) and kept next to the poses. None if MOE can't draw it, so
+    the caller falls back to the ProLIF diagram."""
+    svg_path = moe_dock.interactions_svg_path(poses_path, pose_index)
+    if not svg_path.exists():
+        blocks = [b for b in poses_path.read_text().split("$$$$\n") if b.strip()]
+        if pose_index > len(blocks) or not config.find_moebatch():
+            return None
+        pose_sdf = svg_path.with_suffix(".sdf")
+        pose_sdf.write_text(blocks[pose_index - 1] + "$$$$\n")
+        try:
+            moe_dock.render_interactions(job.receptor_path, pose_sdf, svg_path)
+        except Exception:
+            return None
+        finally:
+            pose_sdf.unlink(missing_ok=True)
+    return moe_dock.browser_svg(svg_path.read_text())
+
+
 @app.get("/api/jobs/{job_id}/ligands/{name}/poses/{pose_index}/interactions2d.svg")
-def ligand_interactions_2d(job_id: str, name: str, pose_index: int) -> Response:
-    """A flattened 2D interaction diagram (ProLIF detection + our own LigPlot-
-    style render, see backend/interactions_prolif.py and backend/interaction_render.py)
-    for one specific already-docked pose. pose_index is 1-based, matching the
+def ligand_interactions_2d(job_id: str, name: str, pose_index: int, style: str = "auto") -> Response:
+    """A flattened 2D interaction diagram for one specific already-docked
+    pose, any engine. style "moe" (or "auto", when MOE is installed) is MOE's
+    own Ligand Interactions diagram; "prolif" (or MOE failing) is ProLIF
+    detection + our own LigPlot-style render, see backend/interactions_prolif.py
+    and backend/interaction_render.py. The X-Diagram-Source response header
+    says which one came back. pose_index is 1-based, matching the
     pose bar's labels and docking.Pose.rank."""
     job = MANAGER.get(job_id)
     if not job:
@@ -637,9 +736,18 @@ def ligand_interactions_2d(job_id: str, name: str, pose_index: int) -> Response:
     if pose_index < 1:
         raise HTTPException(400, "pose_index is 1-based")
 
+    if style not in ("auto", "moe", "prolif"):
+        raise HTTPException(400, "style must be auto, moe or prolif")
+
+    if style != "prolif":
+        svg = _moe_interactions_svg(job, poses_path, pose_index)
+        if svg is not None:
+            return Response(svg, media_type="image/svg+xml", headers={"X-Diagram-Source": "moe"})
+
+    prolif_headers = {"X-Diagram-Source": "prolif"}
     cache_path = job.dir / "interactions" / f"{name}_{pose_index}.svg"
     if cache_path.exists():
-        return Response(cache_path.read_text(), media_type="image/svg+xml")
+        return Response(cache_path.read_text(), media_type="image/svg+xml", headers=prolif_headers)
 
     try:
         mol, hits = iprolif.analyze_pose(job.receptor_path.read_text(), poses_path, pose_index)
@@ -651,7 +759,7 @@ def ligand_interactions_2d(job_id: str, name: str, pose_index: int) -> Response:
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(svg)
-    return Response(svg, media_type="image/svg+xml")
+    return Response(svg, media_type="image/svg+xml", headers=prolif_headers)
 
 
 def _results_csv(job) -> str:
