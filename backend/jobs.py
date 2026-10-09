@@ -10,7 +10,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,8 +20,19 @@ from . import config, covalent_check, docking, prep, rmsd, strain
 from . import pharmacophore as pharm
 
 
+FINISHED = ("done", "failed", "cancelled")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _known_fields(cls, data: dict) -> dict:
+    """The entries of `data` that are fields of dataclass `cls` - lets a
+    results.json written by an older (fewer fields) or newer version load,
+    missing fields falling back to their defaults."""
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in data.items() if k in names}
 
 
 @dataclass
@@ -132,36 +143,33 @@ class Job:
         return self.dir / "logs" / f"{name}.log"
 
     # -- serialisation -----------------------------------------------------
-    def as_dict(self) -> dict:
-        done = sum(1 for lig in self.ligands if lig.status in ("done", "failed", "cancelled"))
+    @property
+    def n_finished(self) -> int:
+        return sum(1 for lig in self.ligands if lig.status in FINISHED)
+
+    def summary(self) -> dict:
+        """The short form GET /api/jobs lists."""
         return {
             "id": self.id,
             "status": self.status,
             "created": self.created,
             "receptor": self.receptor_name,
-            "params": {
-                "center": list(self.params.center),
-                "size": list(self.params.size),
-                "exhaustiveness": self.params.exhaustiveness,
-                "num_modes": self.params.num_modes,
-                "energy_range": self.params.energy_range,
-                "seed": self.params.seed,
-                "scoring": self.params.scoring,
-                "engine": self.params.engine,
-                "use_gpu": self.params.use_gpu,
-                "minimize_after_docking": self.params.minimize_after_docking,
-                "constraints": self.params.constraints,
-                "reference_ligand_pdb": self.params.reference_ligand_pdb,
-                "moe_placement": self.params.moe_placement,
-                "moe_refinement": self.params.moe_refinement,
-                "ph4_id": self.params.ph4_id,
-                "covalent_enabled": self.params.covalent_enabled,
-                "covalent_reaction": self.params.covalent_reaction,
-                "covalent_residue": self.params.covalent_residue,
-                "custom_rxn_id": self.params.custom_rxn_id,
-            },
             "n_ligands": len(self.ligands),
-            "n_finished": done,
+            "n_finished": self.n_finished,
+        }
+
+    def as_dict(self) -> dict:
+        params = asdict(self.params)
+        params["center"] = list(self.params.center)
+        params["size"] = list(self.params.size)
+        return {
+            "id": self.id,
+            "status": self.status,
+            "created": self.created,
+            "receptor": self.receptor_name,
+            "params": params,
+            "n_ligands": len(self.ligands),
+            "n_finished": self.n_finished,
             "ligands": [asdict(lig) for lig in self.ligands],
         }
 
@@ -185,53 +193,15 @@ class Job:
         except (json.JSONDecodeError, OSError):
             return None
 
-        params = JobParams(
-            center=tuple(data["params"]["center"]),
-            size=tuple(data["params"]["size"]),
-            exhaustiveness=data["params"]["exhaustiveness"],
-            num_modes=data["params"]["num_modes"],
-            energy_range=data["params"]["energy_range"],
-            seed=data["params"]["seed"],
-            scoring=data["params"]["scoring"],
-            engine=data["params"].get("engine", "smina"),
-            use_gpu=data["params"].get("use_gpu", True),
-            constraints=data["params"].get("constraints", []),
-            reference_ligand_pdb=data["params"].get("reference_ligand_pdb"),
-            moe_placement=data["params"].get("moe_placement", "Triangle Matcher"),
-            moe_refinement=data["params"].get("moe_refinement", "Rigid Receptor"),
-            ph4_id=data["params"].get("ph4_id"),
-            minimize_after_docking=data["params"].get("minimize_after_docking", False),
-            covalent_enabled=data["params"].get("covalent_enabled", False),
-            covalent_reaction=data["params"].get("covalent_reaction"),
-            covalent_residue=data["params"].get("covalent_residue"),
-            custom_rxn_id=data["params"].get("custom_rxn_id"),
-        )
+        params = JobParams(**_known_fields(JobParams, data["params"]))
+        params.center = tuple(params.center)
+        params.size = tuple(params.size)
         ligands = []
         for lig in data["ligands"]:
-            status = lig["status"]
-            error = lig["error"]
-            if status in ("queued", "running"):
-                status, error = "failed", "server restarted before this ligand finished"
-            ligands.append(
-                LigandRun(
-                    name=lig["name"],
-                    smiles=lig["smiles"],
-                    status=status,
-                    best_score=lig["best_score"],
-                    scores=lig["scores"],
-                    n_poses=lig["n_poses"],
-                    error=error,
-                    started=lig["started"],
-                    finished=lig["finished"],
-                    constraint_satisfied=lig.get("constraint_satisfied"),
-                    constraint_detail=lig.get("constraint_detail", []),
-                    rmsd_to_reference=lig.get("rmsd_to_reference", []),
-                    strain_energies=lig.get("strain_energies", []),
-                    pose_scores=lig.get("pose_scores", []),
-                    covalent_attachments=lig.get("covalent_attachments", []),
-                    warnings=lig.get("warnings", []),
-                )
-            )
+            run = LigandRun(**_known_fields(LigandRun, lig))
+            if run.status in ("queued", "running"):
+                run.status, run.error = "failed", "server restarted before this ligand finished"
+            ligands.append(run)
         job = cls(data["id"], params, ligands, data["receptor"], created=data["created"])
         job.status = "cancelled" if data["status"] == "cancelled" else "done"
         if params.engine == "moe":
@@ -288,19 +258,7 @@ class JobManager:
         with self._lock:
             jobs = list(self._jobs.values())
         jobs.sort(key=lambda j: j.created, reverse=True)
-        return [
-            {
-                "id": j.id,
-                "status": j.status,
-                "created": j.created,
-                "receptor": j.receptor_name,
-                "n_ligands": len(j.ligands),
-                "n_finished": sum(
-                    1 for lig in j.ligands if lig.status in ("done", "failed", "cancelled")
-                ),
-            }
-            for j in jobs
-        ]
+        return [j.summary() for j in jobs]
 
     def cancel(self, job_id: str) -> bool:
         job = self.get(job_id)
@@ -374,42 +332,7 @@ class JobManager:
             constraint_list = [pharm.Constraint.from_dict(c) for c in job.params.constraints]
             constraints = constraint_list or None
 
-            # Build dock params - MOE uses different params than smina/gnina
-            dock_params = {
-                "receptor": job.receptor_path,
-                "ligand_sdf": lig_path,
-                "out_sdf": job.poses_path(run.name),
-                "center": job.params.center,
-                "size": job.params.size,
-                "log_path": job.log_path(run.name),
-                "num_modes": job.params.num_modes,
-                "scoring": job.params.scoring,
-                "engine": job.params.engine,
-                "constraints": constraints,
-            }
-
-            if job.params.engine == "moe":
-                ph4_file = None
-                if job.params.ph4_id:
-                    ph4_file = config.RUNS_DIR / "pharmacophores" / f"{job.params.ph4_id}.ph4"
-                dock_params.update({
-                    "placement": job.params.moe_placement,
-                    "refinement": job.params.moe_refinement,
-                    "ph4_file": ph4_file,
-                    "covalent_enabled": job.params.covalent_enabled,
-                    "covalent_reaction": job.params.covalent_reaction,
-                    "covalent_residue": job.params.covalent_residue,
-                    "custom_rxn_id": job.params.custom_rxn_id,
-                })
-            else:
-                dock_params.update({
-                    "exhaustiveness": job.params.exhaustiveness,
-                    "energy_range": job.params.energy_range,
-                    "seed": job.params.seed,
-                    "use_gpu": job.params.use_gpu,
-                    "cpu": cpu_per_ligand,
-                })
-
+            dock_params = self._dock_params(job, run, lig_path, constraints, cpu_per_ligand)
             poses = docking.dock(**dock_params)
             # MOE doesn't support separate minimize step via smina/gnina
             if job.params.minimize_after_docking and job.params.engine != "moe":
@@ -472,12 +395,48 @@ class JobManager:
         except Exception as exc:  # one bad ligand must not sink the batch
             self._finish(job, run, status="failed", error=str(exc)[:400])
 
+    @staticmethod
+    def _dock_params(job: Job, run: LigandRun, lig_path: Path, constraints, cpu: int) -> dict:
+        """docking.dock() keyword arguments - MOE takes different ones than smina/gnina."""
+        p = job.params
+        common = {
+            "receptor": job.receptor_path,
+            "ligand_sdf": lig_path,
+            "out_sdf": job.poses_path(run.name),
+            "center": p.center,
+            "size": p.size,
+            "log_path": job.log_path(run.name),
+            "num_modes": p.num_modes,
+            "scoring": p.scoring,
+            "engine": p.engine,
+            "constraints": constraints,
+        }
+        if p.engine == "moe":
+            return {
+                **common,
+                "placement": p.moe_placement,
+                "refinement": p.moe_refinement,
+                "ph4_file": config.pharmacophore_path(p.ph4_id) if p.ph4_id else None,
+                "covalent_enabled": p.covalent_enabled,
+                "covalent_reaction": p.covalent_reaction,
+                "covalent_residue": p.covalent_residue,
+                "custom_rxn_id": p.custom_rxn_id,
+            }
+        return {
+            **common,
+            "exhaustiveness": p.exhaustiveness,
+            "energy_range": p.energy_range,
+            "seed": p.seed,
+            "use_gpu": p.use_gpu,
+            "cpu": cpu,
+        }
+
     def _finish(self, job: Job, run: LigandRun, status: str, error: str | None = None) -> None:
         with job.lock:
             run.status = status
             run.error = error
             run.finished = _now()
-            if all(lig.status in ("done", "failed", "cancelled") for lig in job.ligands):
+            if all(lig.status in FINISHED for lig in job.ligands):
                 job.status = "cancelled" if job.cancelled.is_set() else "done"
             job.save()
 

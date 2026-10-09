@@ -68,15 +68,20 @@ def _tool_candidates(tool: str) -> list[Path]:
     return [TOOL_ENV / "bin" / tool]
 
 
-def find_smina() -> str | None:
-    """Locate the smina executable: explicit override, local env, then PATH."""
-    override = os.environ.get("SMINA_BIN")
+def _find_tool(tool: str, env_var: str) -> str | None:
+    """Locate a bundled tool: explicit env override, local env, then PATH."""
+    override = os.environ.get(env_var)
     if override and Path(override).exists():
         return override
-    for candidate in _tool_candidates("smina"):
+    for candidate in _tool_candidates(tool):
         if candidate.exists():
             return str(candidate)
-    return shutil.which("smina")
+    return shutil.which(tool)
+
+
+def find_smina() -> str | None:
+    """Locate the smina executable: explicit override, local env, then PATH."""
+    return _find_tool("smina", "SMINA_BIN")
 
 
 def find_gnina() -> str | None:
@@ -87,24 +92,12 @@ def find_gnina() -> str | None:
     no Windows build, so this only ever resolves there via SMINA_BIN-style
     override or PATH (e.g. a WSL passthrough shim).
     """
-    override = os.environ.get("GNINA_BIN")
-    if override and Path(override).exists():
-        return override
-    for candidate in _tool_candidates("gnina"):
-        if candidate.exists():
-            return str(candidate)
-    return shutil.which("gnina")
+    return _find_tool("gnina", "GNINA_BIN")
 
 
 def find_obrms() -> str | None:
     """Locate the obrms executable: explicit override, local env, then PATH."""
-    override = os.environ.get("OBRMS_BIN")
-    if override and Path(override).exists():
-        return override
-    for candidate in _tool_candidates("obrms"):
-        if candidate.exists():
-            return str(candidate)
-    return shutil.which("obrms")
+    return _find_tool("obrms", "OBRMS_BIN")
 
 
 def find_moebatch() -> str | None:
@@ -184,6 +177,16 @@ def subprocess_env(exe: str) -> dict[str, str]:
 def has_nvidia_gpu() -> bool:
     """Best-effort local hint for the UI; gnina itself decides at run time."""
     return shutil.which("nvidia-smi") is not None
+
+
+def pharmacophore_path(ph4_id: str) -> Path:
+    """Where an uploaded MOE .ph4 file lives (POST /api/pharmacophore/upload)."""
+    return RUNS_DIR / "pharmacophores" / f"{ph4_id}.ph4"
+
+
+def custom_reaction_path(rxn_id: str) -> Path:
+    """Where an uploaded covalent .rxn file lives (POST /api/reactions/upload)."""
+    return RUNS_DIR / "custom_reactions" / f"{rxn_id}.rxn"
 
 
 def ensure_dirs() -> None:
