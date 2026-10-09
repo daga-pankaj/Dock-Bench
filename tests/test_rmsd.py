@@ -54,8 +54,11 @@ def _poses_sdf(tmp_path, mols: list[Chem.Mol]):
 
 
 @pytest.fixture(autouse=True)
-def _require_obrms():
-    if not config.find_obrms():
+def _require_obrms(request):
+    if (
+        not config.find_obrms()
+        and request.node.name != "test_rmsds_to_reference_missing_obrms_returns_all_none"
+    ):
         pytest.skip("obrms not installed")
 
 

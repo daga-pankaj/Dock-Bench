@@ -96,6 +96,17 @@ def find_gnina() -> str | None:
     return shutil.which("gnina")
 
 
+def find_obrms() -> str | None:
+    """Locate the obrms executable: explicit override, local env, then PATH."""
+    override = os.environ.get("OBRMS_BIN")
+    if override and Path(override).exists():
+        return override
+    for candidate in _tool_candidates("obrms"):
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("obrms")
+
+
 def find_moebatch() -> str | None:
     """Locate moebatch executable for MOE docking.
 

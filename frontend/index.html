@@ -8,9 +8,15 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>Docking Bench</h1>
-  <span id="engine" class="pill warn">checking engine…</span>
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">DB</span>
+    <div>
+      <h1>Docking Bench</h1>
+      <span class="sub">Local molecular docking workspace</span>
+    </div>
+  </div>
+  <span id="engine" class="pill warn" role="status" aria-live="polite">checking engine…</span>
 </header>
 
 <main>
@@ -286,16 +292,18 @@
           <a id="dlCsv" class="ghost btnlink disabled">CSV</a>
         </div>
       </div>
-      <table id="results">
-        <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th>constraints</th><th>RMSD Å</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <div class="table-wrap">
+        <table id="results">
+          <thead><tr><th>ligand</th><th>status</th><th>best kcal/mol</th><th>poses</th><th>constraints</th><th>RMSD Å</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
       <p id="resultsEmpty" class="muted small">No job yet. Results appear here as each ligand finishes.</p>
     </div>
   </section>
 </main>
 
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

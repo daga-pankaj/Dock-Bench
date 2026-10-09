@@ -310,27 +310,259 @@ $("engineSel").onchange = () => {
 
 ---
 
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## What's New
+
+Three features added since the initial MOE integration:
+
+| Feature | What it does |
+|---------|--------------|
+| **Covalent docking** | Dock a warhead onto a chosen Cys/Ser/Thr/Tyr/Lys with MOE reaction templates |
+| **2D protein–ligand interaction diagram** | MOE's Ligand Interactions plot per pose, with a ProLIF fallback |
+| **MOE license queue** | Server-wide cap on `moebatch` runs; ligands wait as "queued" instead of failing |
+
+Also: **MOE QuickPrep** for receptor preparation, per-pose MOE score tables, pose stepping, 2D ligand overlay on the 3D view
+
+---
+
+# Covalent Docking
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## Covalent Docking: Overview
+
+**Inputs (MOE engine only):**
+- Target residue as `chain:RES:num` — typed, or **Pick** an atom in the 3D viewer
+- Reaction: one of 22 built-in templates (`$MOE/lib/reactions/covalent/*.rxn`) or an uploaded `.rxn` (draw in Ketcher, export)
+
+**Nucleophile per residue:** CYS SG · SER OG · THR OG1 · TYR OH · LYS NZ
+
+| Target | Common templates |
+|--------|------------------|
+| Cys | `michael_acceptor_s`, `epoxide_s`, `alpha_halocarbonyl_s`, `vinyl_sulfone_s` |
+| Ser/Thr | `michael_acceptor_o`, `epoxide_o`, `carbonyl_o` |
+| Lys | `sulfonyl_halide`, `carbamate` |
+| Tyr | `sulfonyl_halide_tyr` |
+
+**Results:** each pose's MOE scores plus the ligand group it is bonded through
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## Covalent Docking: Matching the GUI's Options
+
+**First attempt:** made-up keys that MOE silently ignored
+```svl
+opt.covalent = 1; opt.rxn_file = '...'; opt.tether = 'A:CYS:189';   // ❌ no effect
+```
+
+**Fix:** copy the structure from the GUI-generated `run.sh`
+```svl
+opt.dockmode      = 'Covalent';
+opt.placement     = 'Covalent Docking';
+opt.placement_opt = [rxnFile: '<file>.rxn', rxsite: 'asel', mode: 'Covalent', ...];
+opt.refine_opt    = [fixrec: 'Fix', tether: 10, ...];   // tether = force constant
+opt.rxsite        = rxsite_atoms(1);                     // the nucleophile atom
+```
+
+**Selecting the reactive atom:**
+```svl
+rxsite_atoms = protein_atoms | rUID aResidue protein_atoms == 294
+                             and aName protein_atoms == 'OG';
+```
+- `aResidue` returns residue *keys*; `rUID` gives the PDB residue number
+- Chain is ignored: MOE renames chains on PDB import
+
+---
+
+## Covalent Docking: The Reactive-Site Bug
+
+**Symptom:** `Reaction did not match protein` on unprepared receptors
+
+**Root cause:** `Dock` runs `Add_H` internally **after** `opt.rxsite` is resolved to an atom index
+→ added hydrogens shift the indices → rxsite points at an unrelated atom
+
+**Fix:** add hydrogens up front, before taking any index
+```svl
+Open '{RECEPTOR_FILE}';
+Add_H Atoms [];          // keeps opt.rxsite stable
+all_atoms = Atoms [];
+```
+
+**How it was found:** reran the GUI's `run.sh`, swapped in our inputs one at a time, and printed state from an instrumented copy of `dock_u.svl`. Guessing at option changes didn't find it.
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## Covalent Docking: Ligand Chemistry Matters
+
+**Case study: 3PBS (ligand AZR on Ser294)**
+- The PDB CCD SMILES is the *bound adduct*, so the reacting carbon is an aldehyde
+- The ester-forming reaction needs a carboxylic acid, so MOE acylated a side-chain carboxylate instead
+
+**Safeguards added (`covalent_check.py`):**
+- `reactant_warning()` warns when the ligand matches the reaction's reactant **0 or >1 times**
+- `acid_form_from_link()` rebuilds a LINKed acyl adduct as its acid form for self-docking
+- Detects which ligand group each pose is attached through
+
+**Rescoring changes pose quality:**
+
+| Rescoring | Top-pose RMSD to crystal (3PBS) |
+|-----------|-------------------------------|
+| London dG | 7.6 Å |
+| GBVI/WSA dG (default) | 1.1–1.4 Å |
+
+---
+
+# 2D Protein–Ligand Interaction Diagram
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## Ligand Interactions Diagram
+
+**MOE's 2D diagram (GUI: Ligand Interactions panel) drawn headless in `moebatch`**
+
+```svl
+grob   = DrawLigandInteractions [[lig], [rec], opt];
+legend = call ['_DrawLigandInteractionsLegend', [[], []], 'prolig2d.svl'];
+gr_fwrite [file, <grob + legend stacked>, 'image/svg+xml', [0,0,1,1]];
+```
+- About 1 s per diagram, no GUI needed
+- `$MOE/svl/run/*.svl` functions aren't loaded in batch → call them with `call [...]`
+
+**When diagrams are drawn:**
+- **MOE jobs:** one per pose, inside the docking run, while the receptor is still loaded
+  → `poses/<ligand>_poses_lid_<n>.svg`, **no extra license checkout**
+- **smina/gnina or older MOE jobs:** drawn on demand (short queued `moebatch` run), then cached
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## Ligand Interactions: Serving & Fallback
+
+**Endpoint:** `GET .../interactions2d.svg?style=auto|moe|prolif`
+- `X-Diagram-Source` response header reports which renderer was used
+- If MOE fails or isn't installed → falls back to the **ProLIF** diagram
+- MOE/ProLIF switch in the diagram panel
+
+**Browser fixes (`browser_svg()`):**
+- Replaces MOE's embedded SVG font, which browsers ignore, with system sans-serif
+- Adds a white background (app panels are dark)
+
+**Example: DPP-4 / sitagliptin (1x70)**
+- Neutral amine SMILES → almost no interactions shown
+- `[NH3+]` → Glu206 H-bond and Glu205 ionic contact, matching the GUI
+- Ligands aren't protonated automatically, so write charged groups explicitly
+
+---
+
+# MOE License Queue
+
+---
+
+## License Queue: The Problem
+
+**Site license:** 6 MOE tokens; each `moebatch` run checks out 2
+
+**Before:** ligands docked in parallel on the shared thread pool
+```
+ligand 1 ✅  ligand 2 ✅  ligand 3 ✅
+ligand 4 ❌  Can't check out license ... Not enough tokens available
+```
+
+Also:
+- Other users on the same license server compete for tokens
+- QuickPrep and on-demand diagrams also need `moebatch`
+- Long MOE jobs blocked smina/gnina workers
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## License Queue: Design
+
+**Every `moebatch` call goes through `moe_dock._run_moebatch`:**
+
+```
+docking ligands ───┐
+QuickPrep ─────────┼──► semaphore (MOE_MAX_CONCURRENT) ──► moebatch
+on-demand diagrams ┘                                          │
+                         license checkout error? ◄────────────┘
+                           yes → sleep MOE_LICENSE_RETRY, retry (≤ MOE_LICENSE_WAIT)
+                           no  → done (other errors fail immediately)
+```
+
+- **Dedicated MOE thread pool** (`JobManager._moe_pool`) sized to the cap; smina/gnina keep their own workers
+- Waiting ligands show status **"queued"** in the UI
+- Only license-checkout failures are retried (every 30 s, up to 3600 s by default)
+- Each ligand gets its own receptor `.moe` copy, which fixes a shared-file race
+- `moebatch` runs from the job folder so Dock's scratch `.mdb` files stay out of the repo root
+
+---
+
+## License Queue: Configuration
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MOE_MAX_CONCURRENT` | 1 | Max simultaneous `moebatch` runs (leaves tokens for other users) |
+| `MOE_LICENSE_WAIT` | 3600 s | How long to keep retrying while tokens are taken |
+| `MOE_LICENSE_RETRY` | 30 s | Delay between retries |
+| `MOEBATCH_BIN` | auto | Path to `moebatch` if not under `/Applications/moe*/bin/` |
+
+```bash
+MOE_MAX_CONCURRENT=2 ./run.sh   # 2 runs × 2 tokens = 4 of 6 tokens
+```
+
+---
+
+<style scoped>section { font-size: 22px; } pre { font-size: 0.8em; }</style>
+
+## MOE QuickPrep
+
+**Receptor panel button → `POST /api/receptor/{id}/quickprep`**
+
+- Batch entry point: `_LIGX_Execute` (the QuickPrep panel's OK action), using your saved QuickPrep settings
+- Structure Preparation → Protonate3D → remove distant waters → tethered minimization
+- **Selected site ligand goes in the `LIGX_LIGAND` collection**: it defines the flexible region. With no ligand, every atom is fixed and minimization does nothing
+- Prepared receptor is stored as a new receptor, shown in the viewer, and used for docking (its hydrogens are kept)
+
+**Report:** hydrogens added, residues built, waters removed, atom shifts, non-default protonation states (site residues first)
+
+**DPP-4 1x70:** His740 → HIP, Asp663 → ASH, ~70 heavy atoms move > 0.5 Å · ~40 s on a cleaned receptor
+
+---
+
 ## Code Organization
 
 ```
 backend/
-├── moe_dock.py              # Main wrapper, ~270 lines
-│   ├── find_moebatch()      # Locate MOE installation
-│   ├── build_svl_script()   # Template → SVL instance
-│   └── dock()               # Orchestration + subprocess
-├── moe_dock_template.svl    # SVL script template, ~30 lines
-├── docking.py               # Multi-engine dispatcher
-│   └── dock_with_moe()      # MOE entry point
-├── jobs.py                  # Job queue, updated for ph4_id
+├── moe_dock.py              # moebatch wrapper, ~550 lines
+│   ├── _run_moebatch()      # License queue: semaphore + retry on token errors
+│   ├── build_svl_script()   # Template → SVL (incl. covalent options, diagram render)
+│   ├── dock()               # Docking orchestration
+│   ├── quickprep()          # MOE QuickPrep (_LIGX_Execute)
+│   └── render_interactions()# On-demand Ligand Interactions SVG
+├── moe_dock_template.svl    # SVL script template, ~60 lines
+├── covalent_check.py        # Reactant-form checks, attachment detection
+├── docking.py               # Multi-engine dispatcher, MOE SDF/score parsing
+├── jobs.py                  # Job store; separate MOE thread pool
+├── prep.py                  # Receptor cleanup, QuickPrep report
 └── main.py                  # FastAPI endpoints
-    └── /api/pharmacophore/upload
-
+    ├── /api/pharmacophore/upload, /api/reactions/upload
+    ├── /api/receptor/{id}/quickprep
+    └── .../poses/{n}/interactions2d.svg
 frontend/
-├── index.html               # MOE params, .ph4 upload UI
-└── src/app.js               # Engine switching logic
+├── index.html               # MOE params, covalent controls, QuickPrep button
+└── src/app.js               # Engine switching, residue Pick, diagram panel
 ```
-
-**Total addition:** ~400 lines backend, ~100 lines frontend
 
 ---
 
@@ -466,12 +698,12 @@ def find_moebatch() -> Optional[str]:
 ### Short-Term
 - [ ] MOE-specific scoring function selection (moe vs smina)
 - [ ] Placement method presets (speed vs accuracy)
-- [ ] Parallel multi-ligand MOE jobs
+- [x] Parallel multi-ligand MOE jobs → license-aware queue
 - [ ] .ph4 file preview/validation before upload
 
 ### Medium-Term
 - [ ] Induced-fit receptor flexibility visualization
-- [ ] MOE-native interaction diagram integration
+- [x] MOE-native interaction diagram integration
 - [ ] Custom SVL script upload (power users)
 - [ ] Benchmark suite (RMSD distribution across PDBbind)
 
@@ -479,7 +711,10 @@ def find_moebatch() -> Optional[str]:
 - [ ] MOE Cloud execution (license pooling)
 - [ ] Fragment-based docking workflow
 - [ ] Water placement analysis
-- [ ] Covalent docking support
+- [x] Covalent docking support
+- [ ] Ligand protonation/wash step for MOE jobs (pH 7)
+- [ ] Auto-detect nucleophiles near the site; suggest a reaction from the warhead
+- [ ] Multi-residue covalent attachment (crosslinkers)
 
 ---
 
@@ -490,6 +725,8 @@ def find_moebatch() -> Optional[str]:
 2. **SVL execution model** requires function wrapping, not top-level code
 3. **MOE site semantics** differ fundamentally from geometric boxes
 4. **Error message archaeology** — check stdout when stderr empty
+5. **Bisect against the GUI's `run.sh`**, don't guess option changes
+6. **Check ligand chemistry first** when covalent results differ
 
 ### Architectural
 1. **Engine abstraction layer** critical for multi-engine support
@@ -574,6 +811,9 @@ open http://127.0.0.1:8000
 - Auto-detection of binding sites from HETATM
 - Native pharmacophore constraint support
 - Systematic job naming by engine + timestamp
+- Covalent docking with MOE reaction templates and reactant-form checks
+- MOE Ligand Interactions diagrams per pose (ProLIF fallback)
+- License-aware MOE queue and QuickPrep receptor preparation
 
 ### Impact
 - **Users:** Multi-engine comparison in one interface
@@ -581,9 +821,8 @@ open http://127.0.0.1:8000
 - **Science:** Cross-validation of docking predictions
 
 ### Code Stats
-- **Backend:** +270 lines Python, +30 lines SVL
-- **Frontend:** +100 lines JavaScript
-- **Total:** ~400 lines for complete MOE integration
+- **Initial integration:** ~400 lines (backend + frontend)
+- **`moe_dock.py` today:** ~550 lines Python, ~60 lines SVL template
 
 ---
 
@@ -594,7 +833,8 @@ open http://127.0.0.1:8000
 **Key Files:**
 - `backend/moe_dock.py` — MOE wrapper
 - `backend/moe_dock_template.svl` — SVL template
-- `MOE_INTEGRATION.md` — Full documentation
+- `backend/covalent_check.py` — Covalent reactant checks
+- `docs/MOE.md` — Full developer notes
 
 **Contact:** Check README for issues/feedback
 
@@ -622,6 +862,12 @@ open http://127.0.0.1:8000
 
 "This placement method requires a pharmacophore"
 → Either upload .ph4 or change placement method
+
+"Reaction did not match protein"
+→ rxsite index shifted (Add_H before taking indices) or wrong residue
+
+"Not enough tokens available"
+→ Handled by the license queue; lower MOE_MAX_CONCURRENT
 ```
 
 ### Debug output
