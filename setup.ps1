@@ -71,4 +71,16 @@ try {
     Pop-Location
 }
 
-Say "done - start the app with:  .\run.ps1"
+$Component = Join-Path $Here "streamlit_app\molstar_component\frontend"
+Say "building the Streamlit app's Mol* viewer component"
+Push-Location $Component
+try {
+    npm install --no-audit --no-fund -q
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+    npm run build
+    if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+} finally {
+    Pop-Location
+}
+
+Say "done - start the app with:  .\run_streamlit.ps1  (or .\run.ps1 for the original web page)"

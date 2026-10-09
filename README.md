@@ -1,7 +1,13 @@
 # Docking Bench
 
-Local web app for small-molecule docking against a protein receptor. Three
-docking engines, picked per job:
+Local web app for small-molecule docking against a protein receptor. It comes
+with two interchangeable front ends over the same backend:
+
+- **Streamlit app** (`./run_streamlit.sh`) — the easiest way to run it on a
+  shared machine and hand colleagues a URL. See "Streamlit app" below.
+- **Original web page** (`./run.sh`) — FastAPI + a static Mol* page.
+
+Three docking engines, picked per job:
 
 - [smina](https://sourceforge.net/projects/smina/) (CPU)
 - [gnina](https://github.com/gnina/gnina) (CNN scoring, CUDA GPU on Linux)
@@ -118,6 +124,36 @@ Open the printed URL in a browser. The top-right pill shows which engines
 
 The server doesn't reload code changes — restart it after pulling updates.
 
+## Streamlit app
+
+Same workflow as the web page — receptor, active site (click in the 3D
+viewer), constraints, covalent docking, ligands, parameters, live results,
+2D interaction diagrams, downloads — served by Streamlit:
+
+```bash
+./run_streamlit.sh                        # http://127.0.0.1:8501, this machine only
+DOCKING_AUTH_PASS=secret HOST=0.0.0.0 ./run_streamlit.sh
+                                          # colleagues open http://<this-machine>:8501
+```
+
+With `DOCKING_AUTH_PASS` (or `DOCKING_REQUIRE_AUTH=1`) set, the app asks for
+the user (`DOCKING_AUTH_USER`, default `colleague`) and password before
+showing anything. Every colleague gets their own session; jobs are shared on
+the server (the Results card's "previous jobs" list shows them all) and
+MOE runs queue across everyone (`MOE_MAX_CONCURRENT`). Settings such as the
+upload limit and theme live in `.streamlit/config.toml`.
+
+The 3D viewer is a Streamlit custom component wrapping the same full Mol*
+app (`streamlit_app/molstar_component/`, built by `./setup.sh`; see its
+README). Clicks in the viewer come back to Python, so site picking,
+constraint points and the covalent residue all work by clicking atoms, as
+on the web page.
+
+How it fits together: `backend/services.py` holds every operation (shared by
+both front ends), `streamlit_app/logic.py` holds the UI decisions (what a
+click means, building the job request — unit-tested), and
+`streamlit_app/app.py`, `setup_panel.py`, `results_panel.py` lay out the page.
+
 ## Sharing with a remote colleague
 
 By default the app only listens on `127.0.0.1` — nothing outside your
@@ -146,9 +182,13 @@ machine can reach it. To hand a colleague a link:
 ```
 
 Tests cover receptor cleanup/HET detection, ligand parsing, smina/gnina
-command construction, MOE script generation and license queueing, and job
-persistence — they mock the subprocess call, so they run without smina,
-gnina or MOE installed.
+command construction, MOE script generation and license queueing, job
+persistence, the Streamlit UI logic, and an end-to-end Streamlit run
+(`tests/test_streamlit_app.py`, skipped without smina). Most mock the
+subprocess call, so they run without smina, gnina or MOE installed.
+
+The viewer component has its own unit tests:
+`cd streamlit_app/molstar_component/frontend && npm test`.
 
 ## Frontend viewer build
 
@@ -173,7 +213,10 @@ npm run watch    # rebuild on every save while developing
 
 ```
 backend/
-  main.py                 FastAPI app: receptor/ligand/job HTTP routes
+  services.py             Every operation (receptors, ligands, jobs, diagrams,
+                          downloads) - shared by both front ends
+  schemas.py              Request models (job request, constraints, ...)
+  main.py                 FastAPI app: thin HTTP routes over services.py
   jobs.py                 Job store: one job -> many ligands, each docked in a thread
   docking.py              Engine dispatch; smina/gnina CLI wrapper, MOE pose parsing
   moe_dock.py             moebatch wrapper: Dock, QuickPrep, Ligand Interactions,
@@ -196,8 +239,15 @@ frontend/
                              src/app.js; vendor/molstar.css is copied from the
                              molstar package)
   package.json, build.mjs   esbuild bundling (see "Frontend viewer build")
+streamlit_app/
+  app.py                    Streamlit entry point (page, auth, viewer events)
+  setup_panel.py            Left column: receptor ... docking parameters
+  results_panel.py          Right column: viewer, 2D diagram, results
+  logic.py                  UI decisions, Streamlit-free and unit-tested
+  molstar_component/        Mol* viewer as a Streamlit custom component
+.streamlit/config.toml      Streamlit settings (theme, upload limit)
 docs/         MOE.md (MOE integration notes); presentation/ slides
-tests/        pytest suite for the backend
+tests/        pytest suite for the backend and the Streamlit app
 runs/         receptor uploads + job outputs (gitignored; created at runtime)
 ```
 
@@ -205,7 +255,8 @@ runs/         receptor uploads + job outputs (gitignored; created at runtime)
 
 | Variable            | Default                  | Purpose                              |
 |----------------------|---------------------------|---------------------------------------|
-| `PORT`               | `8000`                    | `run.sh` listen port                  |
+| `PORT`               | `8000` / `8501`           | `run.sh` / `run_streamlit.sh` listen port |
+| `HOST`               | `127.0.0.1`               | `run_streamlit.sh` bind address (`0.0.0.0` to share on the network) |
 | `DOCKING_RUNS_DIR`   | `<repo>/runs`             | where receptors/job outputs are stored |
 | `DOCKING_WORKERS`    | `cpu_count - 1`           | max concurrent docking processes      |
 | `SMINA_TIMEOUT`      | `1800` (seconds)          | per-ligand docking hard timeout       |
@@ -218,7 +269,7 @@ runs/         receptor uploads + job outputs (gitignored; created at runtime)
 | `DOCKING_MAX_LIGANDS`| `50`                      | max ligands accepted per job          |
 | `DOCKING_REQUIRE_AUTH`| (unset)                  | set to anything to turn on HTTP Basic auth with an auto-generated password (printed to console on start) |
 | `DOCKING_AUTH_USER`  | `colleague`               | Basic auth username                   |
-| `DOCKING_AUTH_PASS`  | (unset)                   | Basic auth password; set this instead of `DOCKING_REQUIRE_AUTH` for a stable password across restarts |
+| `DOCKING_AUTH_PASS`  | (unset)                   | Basic auth password (web page) / login password (Streamlit); set this instead of `DOCKING_REQUIRE_AUTH` for a stable password across restarts |
 
 ## Known limitations
 

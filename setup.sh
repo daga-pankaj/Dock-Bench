@@ -3,6 +3,7 @@
 #   .env-tools/     micromamba prefix holding smina (+ its Open Babel runtime)
 #   .venv/          Python venv holding FastAPI, uvicorn, RDKit, ProLIF
 #   frontend/node_modules/  Mol* (+ React, esbuild) for the viewer bundle
+#   streamlit_app/molstar_component/frontend/  the same viewer as a Streamlit component
 #
 # Safe to re-run; existing installs are reused.
 set -euo pipefail
@@ -82,4 +83,8 @@ say "installing frontend build dependencies (Mol*, React, esbuild)"
 say "bundling the viewer (frontend/src/app.js -> frontend/app.js)"
 (cd "$HERE/frontend" && npm run build)
 
-say "done — start the app with:  ./run.sh"
+COMPONENT="$HERE/streamlit_app/molstar_component/frontend"
+say "building the Streamlit app's Mol* viewer component"
+(cd "$COMPONENT" && npm install --no-audit --no-fund -q && npm run build)
+
+say "done — start the app with:  ./run_streamlit.sh  (or ./run.sh for the original web page)"

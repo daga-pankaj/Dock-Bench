@@ -1,0 +1,18 @@
+# Streamlit settings for `streamlit run streamlit_app/app.py` (run from the
+# project root so this file is picked up).
+
+[server]
+# MB - ligand files may be up to 200 MB (services.MAX_LIGAND_FILE_BYTES)
+maxUploadSize = 200
+headless = true
+
+[client]
+# no "Deploy" button - this runs on an internal machine
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#4da3ff"

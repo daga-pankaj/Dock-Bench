@@ -1,5 +1,5 @@
 .venv/
-.env-tools/
+.env-tools
 .bin/
 runs/
 __pycache__/
@@ -23,3 +23,7 @@ frontend/app.js.map
 # local test data and large presentation binaries
 DPP-4/
 docs/presentation/*.pptx
+
+# Streamlit viewer component build (see streamlit_app/molstar_component/README.md)
+streamlit_app/molstar_component/frontend/node_modules/
+streamlit_app/molstar_component/frontend/dist/
