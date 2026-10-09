@@ -8,6 +8,7 @@ original web page's frontend/src/app.js so both front ends behave the same.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import MutableMapping
 
 State = MutableMapping
@@ -111,10 +112,28 @@ DEFAULTS = {
 }
 
 
+TEXT_INPUT_KEYS = ("pdb_id", "smiles_box", "self_dock_smiles", "residue_search")
+
+
+def _is_setting_key(key: str) -> bool:
+    return (key in DEFAULTS or key in TEXT_INPUT_KEYS or key.startswith("chain_")
+            or re.fullmatch(r"c\d+_(kind|x|y|z|radius|required|label|smarts)", key) is not None)
+
+
 def init_state(state: State) -> None:
+    """Fill in missing defaults, and keep every setting alive across reruns.
+
+    Streamlit drops a widget's value from session state on any run where the
+    widget isn't drawn - e.g. the smina-only "minimize" box while MOE is
+    selected - so callbacks (Run) would then find it missing and the value
+    would be lost on switching back. Re-assigning each setting marks it as
+    app-owned, which Streamlit keeps."""
     for key, value in DEFAULTS.items():
         if key not in state:
             state[key] = list(value) if isinstance(value, list) else value
+    for key in list(state.keys()):
+        if _is_setting_key(key):
+            state[key] = state[key]
 
 
 def toast(state: State, message: str, bad: bool = False) -> None:

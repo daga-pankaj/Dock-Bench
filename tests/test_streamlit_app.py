@@ -94,3 +94,25 @@ def test_dock_through_the_ui(isolated_runs_dir):
     at.run()
     assert not at.exception
     assert any("<img" in m.value and "interaction diagram" in m.value for m in at.markdown)
+
+
+def test_settings_survive_hidden_widgets(isolated_runs_dir):
+    """Switching to an engine that hides a widget (MOE hides the smina-only
+    "minimize" box) must not drop its value - Run used to KeyError."""
+    at = _app()
+    at.session_state["minimize_after"] = True
+    at.run()
+    # simulate Streamlit's cleanup of a widget that wasn't drawn
+    from streamlit_app import logic
+
+    state = {k: at.session_state[k] for k in ("minimize_after",)}
+    del state["minimize_after"]
+    logic.init_state(state)
+    assert state["minimize_after"] is False  # default restored, not KeyError
+    if "moe" in logic.engine_options(services.status()):
+        at.selectbox(key="engine").set_value("moe").run()
+        at.run()
+        next(b for b in at.button if b.label == "Run").click().run()
+        assert not at.exception, at.exception
+        assert at.session_state["minimize_after"] is True
+        assert any("load a receptor first" in t.value for t in at.toast)
