@@ -24,6 +24,6 @@ frontend/app.js.map
 DPP-4/
 docs/presentation/*.pptx
 
-# Streamlit viewer component build (see streamlit_app/molstar_component/README.md)
+# Streamlit viewer component (see streamlit_app/molstar_component/README.md).
+# dist/ is committed: Streamlit Community Cloud runs no npm build.
 streamlit_app/molstar_component/frontend/node_modules/
-streamlit_app/molstar_component/frontend/dist/

@@ -175,6 +175,36 @@ machine can reach it. To hand a colleague a link:
    credentials on first load.
 3. `Ctrl+C` the tunnel when you're done — the link stops working immediately.
 
+## Hosting on Streamlit Community Cloud
+
+Gives a permanent `https://<name>.streamlit.app` link guarded by a password,
+with nothing running on your machine. smina docking only (no MOE licence and
+no GPU in the cloud).
+
+1. Push this repo to GitHub (private repos work). The cloud reads:
+   - `requirements.txt` - Python packages
+   - `packages.txt` - apt packages: `smina`, `openbabel` (for `obrms`)
+   - `streamlit_app/molstar_component/frontend/dist/` - the prebuilt viewer.
+     Rebuild it (`npm run build` in that folder) and commit after changing
+     the viewer source; the cloud does not run npm.
+2. Go to https://share.streamlit.io, sign in with GitHub, **Create app**:
+   repo `daga-pankaj/Dock-Bench`, branch `remodel`, main file
+   `streamlit_app/app.py`. Under **Advanced settings** pick Python 3.12 and
+   paste the secrets (top-level secrets become environment variables):
+   ```toml
+   DOCKING_AUTH_USER = "colleague"
+   DOCKING_AUTH_PASS = "pick-a-long-password"
+   DOCKING_MAX_LIGANDS = "20"
+   ```
+   Always set `DOCKING_AUTH_PASS` - without it the app is open to anyone
+   with the link.
+3. Share the URL plus user/password. Change the password any time under the
+   app's **Settings - Secrets**; the app restarts with the new one.
+
+Limits: the free tier has about 1 GB RAM and a couple of shared CPUs, so
+keep jobs small. `runs/` is not persistent - results vanish when the app
+restarts or sleeps (after a few days idle), so download what you need.
+
 ## Testing
 
 ```bash
