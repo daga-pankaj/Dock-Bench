@@ -205,7 +205,16 @@ Limits: the free tier has about 1 GB RAM and a couple of shared CPUs, so
 keep jobs small. `runs/` is not persistent - results vanish when the app
 restarts or sleeps (after a few days idle), so download what you need.
 
-## Testing
+## Running on Google Colab
+
+`notebooks/Dock_Bench_Colab.ipynb` installs everything on a Colab machine,
+starts the Streamlit app behind `DOCKING_AUTH_PASS`, and prints a temporary
+`https://<random>.trycloudflare.com` link to share. Open it from Colab
+(File - Open notebook - GitHub), add a `GITHUB_TOKEN` Colab secret (the repo
+is private), set a password and Run all. The link lasts only while the
+session runs, and each run gives a new link. A T4 GPU runtime plus
+`install_gnina` enables gnina.
+
 
 ```bash
 .venv/bin/python -m pytest tests/ -q
